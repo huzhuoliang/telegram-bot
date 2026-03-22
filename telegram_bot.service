@@ -8,6 +8,7 @@ Type=simple
 User=huzhuoliang
 WorkingDirectory=/home/huzhuoliang/claude-workspace/telegram_monitor
 ExecStart=/usr/bin/python3 /home/huzhuoliang/claude-workspace/telegram_monitor/bot.py
+Environment=PATH=/home/huzhuoliang/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
