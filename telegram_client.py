@@ -43,6 +43,35 @@ class TelegramClient:
                 success = False
         return success
 
+    def send_photo(self, photo: str, caption: str = "") -> bool:
+        """Send a photo. `photo` can be a local file path or an HTTP(S) URL.
+        Never raises; returns True on success."""
+        payload = {"chat_id": self.chat_id}
+        if caption:
+            payload["caption"] = caption
+        try:
+            if photo.startswith("http://") or photo.startswith("https://"):
+                resp = self._session.post(
+                    self._url("sendPhoto"),
+                    json={**payload, "photo": photo},
+                    timeout=30,
+                )
+            else:
+                with open(photo, "rb") as f:
+                    resp = self._session.post(
+                        self._url("sendPhoto"),
+                        data=payload,
+                        files={"photo": f},
+                        timeout=30,
+                    )
+            if not resp.ok:
+                logger.warning("sendPhoto failed: %s %s", resp.status_code, resp.text[:200])
+                return False
+            return True
+        except Exception as e:
+            logger.warning("sendPhoto exception: %s", e)
+            return False
+
     def get_updates(self, offset: int, timeout: int = 30) -> list:
         """Long-poll for new updates. Returns list of update dicts, [] on error."""
         params = {

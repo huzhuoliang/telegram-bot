@@ -1,7 +1,9 @@
 """Local HTTP notification server.
 
-Other applications POST to http://127.0.0.1:<port>/send to send Telegram messages.
-Request body: {"text": "message text"}
+Endpoints:
+  POST /send        {"text": "message text"}
+  POST /send_photo  {"photo": "/path/to/file.png", "caption": "optional"}
+                    {"photo": "https://...",        "caption": "optional"}
 """
 
 import json
@@ -17,15 +19,10 @@ class _NotifyHandler(BaseHTTPRequestHandler):
     telegram_client = None
 
     def do_POST(self):
-        if self.path != "/send":
-            self._respond(404, b"Not found")
-            return
-
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             self._respond(400, b"Empty body")
             return
-
         body = self.rfile.read(length)
         try:
             data = json.loads(body)
@@ -33,13 +30,25 @@ class _NotifyHandler(BaseHTTPRequestHandler):
             self._respond(400, b"Invalid JSON")
             return
 
-        text = data.get("text", "")
-        if not text:
-            self._respond(400, b"Missing 'text'")
-            return
+        if self.path == "/send":
+            text = data.get("text", "")
+            if not text:
+                self._respond(400, b"Missing 'text'")
+                return
+            ok = self.telegram_client.send_message(str(text))
+            self._respond(200 if ok else 500, b"ok" if ok else b"send failed")
 
-        ok = self.telegram_client.send_message(str(text))
-        self._respond(200 if ok else 500, b"ok" if ok else b"send failed")
+        elif self.path == "/send_photo":
+            photo = data.get("photo", "")
+            if not photo:
+                self._respond(400, b"Missing 'photo'")
+                return
+            caption = data.get("caption", "")
+            ok = self.telegram_client.send_photo(photo, caption)
+            self._respond(200 if ok else 500, b"ok" if ok else b"send failed")
+
+        else:
+            self._respond(404, b"Not found")
 
     def do_GET(self):
         if self.path == "/health":
