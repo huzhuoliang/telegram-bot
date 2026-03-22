@@ -37,7 +37,7 @@ class _NotifyHandler(BaseHTTPRequestHandler):
             if not text:
                 self._respond(400, b"Missing 'text'")
                 return
-            ok = self.telegram_client.send_message(str(text))
+            ok = self.telegram_client.send_message(str(text)) is not None
             self._respond(200 if ok else 500, b"ok" if ok else b"send failed")
 
         elif self.path == "/send_photo":

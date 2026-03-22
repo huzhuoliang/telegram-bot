@@ -178,23 +178,27 @@ class ClaudeHandler:
         if not text:
             return "Usage: ?<question>"
         logger.info("Claude [%s]: %s", self.backend, text[:80])
+        processing_msg_id = None
         if self._telegram_client:
-            self._telegram_client.send_message("⏳ 处理中...")
+            processing_msg_id = self._telegram_client.send_message("⏳ 处理中...")
         with self._lock:
             try:
                 if self.backend == "api":
-                    return self._call_api(text)
+                    reply = self._call_api(text)
                 else:
-                    return self._call_cli(text)
+                    reply = self._call_cli(text)
             except subprocess.TimeoutExpired:
-                return f"Claude CLI timed out after {self.cli_timeout}s"
+                reply = f"Claude CLI timed out after {self.cli_timeout}s"
             except FileNotFoundError:
-                return "Error: `claude` CLI not found in PATH"
+                reply = "Error: `claude` CLI not found in PATH"
             except Exception as e:
                 if self.backend == "api" and self._history and self._history[-1]["role"] == "user":
                     self._history.pop()  # roll back poisoned history entry
                 logger.warning("Claude error: %s", e)
-                return f"Claude error: {e}"
+                reply = f"Claude error: {e}"
+        if processing_msg_id and self._telegram_client:
+            self._telegram_client.delete_message(processing_msg_id)
+        return reply
 
     def clear_history(self) -> str:
         with self._lock:

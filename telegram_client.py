@@ -21,30 +21,64 @@ class TelegramClient:
     def _url(self, method: str) -> str:
         return TELEGRAM_API.format(token=self.token, method=method)
 
-    def send_message(self, text: str, parse_mode: str = "") -> bool:
+    def send_message(self, text: str, parse_mode: str = "") -> int | None:
         """Send text to the configured chat. Splits messages > 4096 chars.
-        Never raises; returns True on full success."""
+        Returns the message_id of the first chunk on success, None on failure."""
         if not text:
-            return True
+            return None
 
         chunks = [text[i:i + MAX_MESSAGE_LEN] for i in range(0, len(text), MAX_MESSAGE_LEN)]
-        success = True
+        first_id = None
         for chunk in chunks:
             payload = {"chat_id": self.chat_id, "text": chunk}
             if parse_mode:
                 payload["parse_mode"] = parse_mode
             try:
                 resp = self._session.post(self._url("sendMessage"), json=payload, timeout=10)
-                if not resp.ok:
+                if resp.ok:
+                    if first_id is None:
+                        first_id = resp.json().get("result", {}).get("message_id")
+                else:
                     logger.warning("sendMessage failed: %s %s", resp.status_code, resp.text[:200])
-                    success = False
             except Exception as e:
                 logger.warning("sendMessage exception: %s", e)
-                success = False
-        return success
+        return first_id
+
+    def delete_message(self, message_id: int) -> bool:
+        """Delete a message by ID. Returns True on success."""
+        try:
+            resp = self._session.post(
+                self._url("deleteMessage"),
+                json={"chat_id": self.chat_id, "message_id": message_id},
+                timeout=10,
+            )
+            return resp.ok
+        except Exception as e:
+            logger.warning("deleteMessage exception: %s", e)
+            return False
+
+    def _download_and_upload_photo(self, url: str, payload: dict) -> bool:
+        """Fallback: download image via local proxy, upload as file to Telegram."""
+        try:
+            dl = self._session.get(url, timeout=30)
+            dl.raise_for_status()
+            resp = self._session.post(
+                self._url("sendPhoto"),
+                data=payload,
+                files={"photo": ("photo.jpg", dl.content, dl.headers.get("Content-Type", "image/jpeg"))},
+                timeout=30,
+            )
+            if not resp.ok:
+                logger.warning("sendPhoto upload fallback failed: %s %s", resp.status_code, resp.text[:200])
+                return False
+            return True
+        except Exception as e:
+            logger.warning("sendPhoto download fallback exception: %s", e)
+            return False
 
     def send_photo(self, photo: str, caption: str = "") -> bool:
         """Send a photo. `photo` can be a local file path or an HTTP(S) URL.
+        For URLs, falls back to downloading via local proxy if Telegram can't fetch directly.
         Never raises; returns True on success."""
         payload = {"chat_id": self.chat_id}
         if caption:
@@ -56,6 +90,11 @@ class TelegramClient:
                     json={**payload, "photo": photo},
                     timeout=30,
                 )
+                if resp.ok:
+                    return True
+                # Telegram couldn't fetch the URL — download it ourselves and upload
+                logger.info("sendPhoto URL failed (%s), trying download+upload fallback", resp.status_code)
+                return self._download_and_upload_photo(photo, payload)
             else:
                 with open(photo, "rb") as f:
                     resp = self._session.post(
@@ -64,10 +103,10 @@ class TelegramClient:
                         files={"photo": f},
                         timeout=30,
                     )
-            if not resp.ok:
-                logger.warning("sendPhoto failed: %s %s", resp.status_code, resp.text[:200])
-                return False
-            return True
+                if not resp.ok:
+                    logger.warning("sendPhoto failed: %s %s", resp.status_code, resp.text[:200])
+                    return False
+                return True
         except Exception as e:
             logger.warning("sendPhoto exception: %s", e)
             return False
@@ -85,6 +124,25 @@ class TelegramClient:
                     json={**payload, "video": video},
                     timeout=60,
                 )
+                if resp.ok:
+                    return True
+                logger.info("sendVideo URL failed (%s), trying download+upload fallback", resp.status_code)
+                try:
+                    dl = self._session.get(video, timeout=60)
+                    dl.raise_for_status()
+                    resp = self._session.post(
+                        self._url("sendVideo"),
+                        data=payload,
+                        files={"video": ("video.mp4", dl.content, "video/mp4")},
+                        timeout=120,
+                    )
+                    if not resp.ok:
+                        logger.warning("sendVideo upload fallback failed: %s", resp.status_code)
+                        return False
+                    return True
+                except Exception as e:
+                    logger.warning("sendVideo download fallback exception: %s", e)
+                    return False
             else:
                 with open(video, "rb") as f:
                     resp = self._session.post(
@@ -93,10 +151,10 @@ class TelegramClient:
                         files={"video": f},
                         timeout=120,
                     )
-            if not resp.ok:
-                logger.warning("sendVideo failed: %s %s", resp.status_code, resp.text[:200])
-                return False
-            return True
+                if not resp.ok:
+                    logger.warning("sendVideo failed: %s %s", resp.status_code, resp.text[:200])
+                    return False
+                return True
         except Exception as e:
             logger.warning("sendVideo exception: %s", e)
             return False
