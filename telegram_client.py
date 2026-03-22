@@ -10,10 +10,13 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramClient:
-    def __init__(self, token: str, chat_id: str):
+    def __init__(self, token: str, chat_id: str, proxy: str = ""):
         self.token = token.strip()
         self.chat_id = str(chat_id).strip()
         self._session = requests.Session()
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
+            logger.info("Using proxy: %s", proxy)
 
     def _url(self, method: str) -> str:
         return TELEGRAM_API.format(token=self.token, method=method)

@@ -104,7 +104,7 @@ def main():
         logger.warning("ANTHROPIC_API_KEY not set — Claude API backend will fail on use")
 
     token, chat_id = load_credentials()
-    client = TelegramClient(token, chat_id)
+    client = TelegramClient(token, chat_id, proxy=config.get("proxy", ""))
 
     shell_handler = ShellHandler(
         timeout=config.get("shell_timeout", 30),

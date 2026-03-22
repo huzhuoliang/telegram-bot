@@ -4,6 +4,7 @@
     "status": "Bot is running.",
     "ping": "pong"
   },
+  "proxy": "http://127.0.0.1:2080",
   "notify_port": 8765,
   "poll_interval": 2,
   "shell_timeout": 30,
