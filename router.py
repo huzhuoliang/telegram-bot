@@ -37,6 +37,10 @@ class Router:
 
         logger.info("Incoming [%s]: %s", sender_id, text[:80])
 
+        # Special commands (must be checked before prefix dispatch)
+        if text.lower() in ("!clear", "/clear"):
+            return self.claude.clear_history()
+
         # !cmd → shell
         if text.startswith("!"):
             return self.shell.handle(text[1:].strip())
@@ -44,10 +48,6 @@ class Router:
         # ?question → Claude
         if text.startswith("?"):
             return self.claude.handle(text[1:].strip())
-
-        # Special: clear Claude history
-        if text.lower() in ("!clear", "/clear"):
-            return self.claude.clear_history()
 
         # Preset match
         preset_reply = self.preset.handle(text)
