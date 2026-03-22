@@ -1,11 +1,35 @@
 """Message handlers: shell execution, Claude AI, and preset responses."""
 
 import logging
+import re
 import subprocess
 import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Claude uses these markers in its response to trigger media actions.
+# Formats:
+#   [PHOTO: <url_or_path>]
+#   [PHOTO: <url_or_path> | <caption>]
+#   [VIDEO: <url_or_path>]
+#   [VIDEO: <url_or_path> | <caption>]
+_ACTION_RE = re.compile(r'\[(PHOTO|VIDEO):\s*([^\]|]+?)(?:\s*\|\s*([^\]]*))?\]')
+
+_SYSTEM_PROMPT = """You are a helpful assistant running as a Telegram bot on the user's personal server. Be concise. Telegram supports basic Markdown.
+
+You can send media to the user by including action markers in your response:
+  [PHOTO: <url_or_path>]
+  [PHOTO: <url_or_path> | <caption>]
+  [VIDEO: <url_or_path>]
+  [VIDEO: <url_or_path> | <caption>]
+
+These markers are automatically extracted and executed — the user will receive the media directly. Use publicly accessible URLs (e.g. Wikipedia Commons, direct image links). Do not explain how to use send.py or any CLI tool; just include the marker and the media will be delivered.
+
+Examples:
+- User asks for a celebrity photo → find a public URL and write [PHOTO: https://...]
+- User asks to send a file on the server → write [PHOTO: /home/user/image.jpg]
+"""
 
 
 class ShellHandler:
@@ -62,6 +86,9 @@ class ClaudeHandler:
     - "api": calls Anthropic SDK directly.
               Requires ANTHROPIC_API_KEY env var.
               Maintains a rolling conversation history (claude_history_turns).
+
+    Both backends support action markers ([PHOTO: url], [VIDEO: url]) in
+    Claude's response, which are automatically extracted and sent via Telegram.
     """
 
     def __init__(
@@ -71,12 +98,14 @@ class ClaudeHandler:
         max_tokens: int = 1024,
         history_turns: int = 6,
         cli_timeout: int = 60,
+        telegram_client=None,
     ):
         self.backend = backend
         self.model = model
         self.max_tokens = max_tokens
         self.history_turns = history_turns
         self.cli_timeout = cli_timeout
+        self._telegram_client = telegram_client
         self._history: list[dict] = []
         self._lock = threading.Lock()
         self._api_client = None  # lazy-init only if backend == "api"
@@ -87,14 +116,35 @@ class ClaudeHandler:
             self._api_client = anthropic.Anthropic()
         return self._api_client
 
+    def _execute_actions(self, response: str) -> str:
+        """Extract [PHOTO:] / [VIDEO:] markers, send the media, return cleaned text."""
+        if not self._telegram_client:
+            return response
+
+        def _run(match):
+            kind = match.group(1)
+            target = match.group(2).strip()
+            caption = (match.group(3) or "").strip()
+            logger.info("Action from Claude: %s %s", kind, target)
+            if kind == "PHOTO":
+                self._telegram_client.send_photo(target, caption)
+            elif kind == "VIDEO":
+                self._telegram_client.send_video(target, caption)
+            return ""  # remove marker from text reply
+
+        cleaned = _ACTION_RE.sub(_run, response).strip()
+        return cleaned
+
     def _call_cli(self, text: str) -> str:
+        prompt = f"{_SYSTEM_PROMPT}\nUser: {text}"
         result = subprocess.run(
-            ["claude", "-p", text],
+            ["claude", "-p", prompt],
             capture_output=True,
             text=True,
             timeout=self.cli_timeout,
         )
-        return result.stdout.strip() or result.stderr.strip() or "No response"
+        raw = result.stdout.strip() or result.stderr.strip() or "No response"
+        return self._execute_actions(raw)
 
     def _call_api(self, text: str) -> str:
         # history is already locked by caller
@@ -106,15 +156,14 @@ class ClaudeHandler:
         response = client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=(
-                "You are a helpful assistant running as a Telegram bot on the user's "
-                "personal server. Be concise. Telegram supports basic Markdown."
-            ),
+            system=_SYSTEM_PROMPT,
             messages=self._history,
         )
-        reply = response.content[0].text
-        self._history.append({"role": "assistant", "content": reply})
-        return reply
+        raw = response.content[0].text
+        # Store cleaned text in history so markers don't pollute future context
+        cleaned = self._execute_actions(raw)
+        self._history.append({"role": "assistant", "content": cleaned or raw})
+        return cleaned
 
     def handle(self, text: str) -> str:
         if not text:

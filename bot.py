@@ -116,6 +116,7 @@ def main():
         max_tokens=config.get("claude_max_tokens", 1024),
         history_turns=config.get("claude_history_turns", 6),
         cli_timeout=config.get("claude_cli_timeout", 60),
+        telegram_client=client,
     )
     preset_handler = PresetHandler(config.get("presets", {}))
     router = Router(chat_id, shell_handler, claude_handler, preset_handler)
