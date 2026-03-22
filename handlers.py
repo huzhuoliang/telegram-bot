@@ -18,22 +18,24 @@ _ACTION_RE = re.compile(r'\[(PHOTO|VIDEO):\s*([^\]|]+?)(?:\s*\|\s*([^\]]*))?\]')
 
 _SYSTEM_PROMPT = """You are a helpful assistant running as a Telegram bot on the user's personal server. Be concise. Telegram supports basic Markdown.
 
-IMPORTANT: Every message must have a text reply. Never return an empty response.
+RULES:
+1. Every response MUST contain at least one sentence of text.
+2. When the user asks for a photo or video of any person or thing, you MUST send it using the marker format below. Do NOT describe what you would do — just do it.
+3. Use real, publicly accessible URLs (Wikipedia Commons, official sites, etc.).
 
-You can send media to the user by including action markers anywhere in your response:
-  [PHOTO: <url_or_path>]
-  [PHOTO: <url_or_path> | <caption>]
-  [VIDEO: <url_or_path>]
-  [VIDEO: <url_or_path> | <caption>]
+To send media, embed these markers anywhere in your response:
+  [PHOTO: <url>]
+  [PHOTO: <url> | <caption>]
+  [VIDEO: <url>]
+  [VIDEO: <url> | <caption>]
 
-These markers are automatically extracted and executed — the user will receive the media directly. Use publicly accessible URLs (e.g. Wikipedia Commons, direct image links). Do not explain how to use any CLI tool; just include the marker and the media will be delivered.
+The markers are extracted and executed automatically. The user receives the media directly. Never tell the user to run a command or script.
 
-When the user asks to search for or find a photo/video of someone, always find a URL and send it using the marker. "搜索一张X的照片" means find and send a photo of X.
-
-Examples:
-- "搜索一张杨幂的照片" → [PHOTO: https://...] 这是杨幂的照片。
-- "发一张刘亦菲的图片" → [PHOTO: https://...] 已发送。
-- User asks to send a file on the server → [PHOTO: /home/user/image.jpg] 已发送。
+Examples of CORRECT responses:
+- User: "搜索一张杨幂的照片"
+  You: [PHOTO: https://upload.wikimedia.org/wikipedia/commons/...] 这是杨幂的照片。
+- User: "发一张刘亦菲的图片"
+  You: [PHOTO: https://upload.wikimedia.org/wikipedia/commons/...] 已发送。
 """
 
 
@@ -150,6 +152,7 @@ class ClaudeHandler:
             timeout=self.cli_timeout,
         )
         raw = result.stdout.strip() or result.stderr.strip() or "No response"
+        logger.info("Claude raw response: %s", raw[:300])
         return self._execute_actions(raw)
 
     def _call_api(self, text: str) -> str:
@@ -175,6 +178,8 @@ class ClaudeHandler:
         if not text:
             return "Usage: ?<question>"
         logger.info("Claude [%s]: %s", self.backend, text[:80])
+        if self._telegram_client:
+            self._telegram_client.send_message("⏳ 处理中...")
         with self._lock:
             try:
                 if self.backend == "api":
