@@ -18,17 +18,22 @@ _ACTION_RE = re.compile(r'\[(PHOTO|VIDEO):\s*([^\]|]+?)(?:\s*\|\s*([^\]]*))?\]')
 
 _SYSTEM_PROMPT = """You are a helpful assistant running as a Telegram bot on the user's personal server. Be concise. Telegram supports basic Markdown.
 
-You can send media to the user by including action markers in your response:
+IMPORTANT: Every message must have a text reply. Never return an empty response.
+
+You can send media to the user by including action markers anywhere in your response:
   [PHOTO: <url_or_path>]
   [PHOTO: <url_or_path> | <caption>]
   [VIDEO: <url_or_path>]
   [VIDEO: <url_or_path> | <caption>]
 
-These markers are automatically extracted and executed — the user will receive the media directly. Use publicly accessible URLs (e.g. Wikipedia Commons, direct image links). Do not explain how to use send.py or any CLI tool; just include the marker and the media will be delivered.
+These markers are automatically extracted and executed — the user will receive the media directly. Use publicly accessible URLs (e.g. Wikipedia Commons, direct image links). Do not explain how to use any CLI tool; just include the marker and the media will be delivered.
+
+When the user asks to search for or find a photo/video of someone, always find a URL and send it using the marker. "搜索一张X的照片" means find and send a photo of X.
 
 Examples:
-- User asks for a celebrity photo → find a public URL and write [PHOTO: https://...]
-- User asks to send a file on the server → write [PHOTO: /home/user/image.jpg]
+- "搜索一张杨幂的照片" → [PHOTO: https://...] 这是杨幂的照片。
+- "发一张刘亦菲的图片" → [PHOTO: https://...] 已发送。
+- User asks to send a file on the server → [PHOTO: /home/user/image.jpg] 已发送。
 """
 
 
@@ -133,7 +138,8 @@ class ClaudeHandler:
             return ""  # remove marker from text reply
 
         cleaned = _ACTION_RE.sub(_run, response).strip()
-        return cleaned
+        # If the entire response was action markers, ensure we still send something
+        return cleaned or "已发送。"
 
     def _call_cli(self, text: str) -> str:
         prompt = f"{_SYSTEM_PROMPT}\nUser: {text}"
