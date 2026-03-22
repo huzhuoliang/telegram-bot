@@ -212,3 +212,41 @@ class PresetHandler:
 
     def handle(self, text: str) -> str | None:
         return self._presets.get(text.lower().strip())
+
+
+class MediaArchiveHandler:
+    """Saves incoming photos and videos forwarded to the bot."""
+
+    def __init__(self, archive_dir: str, telegram_client):
+        self.archive_dir = Path(archive_dir).expanduser()
+        self._client = telegram_client
+
+    def handle(self, message: dict) -> str:
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+        if "photo" in message:
+            # Telegram sends multiple sizes; pick the largest (last in array)
+            file_id = message["photo"][-1]["file_id"]
+            save_path = str(self.archive_dir / "photos" / f"{ts}.jpg")
+            kind = "图片"
+        elif "video" in message:
+            file_id = message["video"]["file_id"]
+            ext = message["video"].get("mime_type", "video/mp4").split("/")[-1]
+            save_path = str(self.archive_dir / "videos" / f"{ts}.{ext}")
+            kind = "视频"
+        elif "document" in message:
+            doc = message["document"]
+            file_id = doc["file_id"]
+            filename = doc.get("file_name", f"{ts}.bin")
+            save_path = str(self.archive_dir / "documents" / filename)
+            kind = "文件"
+        else:
+            return "不支持的媒体类型。"
+
+        logger.info("Archiving %s → %s", kind, save_path)
+        ok = self._client.download_file(file_id, save_path)
+        if ok:
+            return f"✅ {kind}已存档：{save_path}"
+        else:
+            return f"❌ {kind}存档失败，请查看日志。"

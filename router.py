@@ -6,11 +6,13 @@ logger = logging.getLogger(__name__)
 
 
 class Router:
-    def __init__(self, chat_id: str, shell_handler, claude_handler, preset_handler):
+    def __init__(self, chat_id: str, shell_handler, claude_handler, preset_handler,
+                 media_archive_handler=None):
         self.chat_id = str(chat_id).strip()
         self.shell = shell_handler
         self.claude = claude_handler
         self.preset = preset_handler
+        self.media_archive = media_archive_handler
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
@@ -23,6 +25,11 @@ class Router:
         if sender_id != self.chat_id:
             logger.debug("Ignored message from unauthorized chat_id=%s", sender_id)
             return None
+
+        # Media messages (photo, video, document)
+        if self.media_archive and any(k in message for k in ("photo", "video", "document")):
+            logger.info("Incoming media from [%s]", sender_id)
+            return self.media_archive.handle(message)
 
         text = (message.get("text") or "").strip()
         if not text:

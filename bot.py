@@ -21,7 +21,7 @@ import sys
 import threading
 from pathlib import Path
 
-from handlers import ClaudeHandler, PresetHandler, ShellHandler
+from handlers import ClaudeHandler, MediaArchiveHandler, PresetHandler, ShellHandler
 from notify_server import run_notify_server
 from router import Router
 from telegram_client import TelegramClient
@@ -119,7 +119,12 @@ def main():
         telegram_client=client,
     )
     preset_handler = PresetHandler(config.get("presets", {}))
-    router = Router(chat_id, shell_handler, claude_handler, preset_handler)
+    media_archive_handler = MediaArchiveHandler(
+        archive_dir=config.get("archive_dir", "~/telegram_archive"),
+        telegram_client=client,
+    )
+    router = Router(chat_id, shell_handler, claude_handler, preset_handler,
+                    media_archive_handler=media_archive_handler)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)

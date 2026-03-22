@@ -159,6 +159,31 @@ class TelegramClient:
             logger.warning("sendVideo exception: %s", e)
             return False
 
+    def download_file(self, file_id: str, save_path: str) -> bool:
+        """Download a Telegram file by file_id and save to save_path.
+        Never raises; returns True on success."""
+        try:
+            resp = self._session.post(
+                self._url("getFile"),
+                json={"file_id": file_id},
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.warning("getFile failed: %s", resp.text[:200])
+                return False
+            file_path = resp.json()["result"]["file_path"]
+            download_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+            dl = self._session.get(download_url, timeout=60)
+            dl.raise_for_status()
+            import os
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(dl.content)
+            return True
+        except Exception as e:
+            logger.warning("download_file exception: %s", e)
+            return False
+
     def get_updates(self, offset: int, timeout: int = 30) -> list:
         """Long-poll for new updates. Returns list of update dicts, [] on error."""
         params = {
