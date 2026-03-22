@@ -17,16 +17,27 @@ python3 send.py --video /tmp/recording.mp4 --caption "说明"
 
 # HTTP endpoints
 curl -X POST http://127.0.0.1:8765/send       -H 'Content-Type: application/json' -d '{"text":"hello"}'
+curl -X POST http://127.0.0.1:8765/send       -H 'Content-Type: application/json' -d '{"text":"<b>bold</b>","parse_mode":"HTML"}'
 curl -X POST http://127.0.0.1:8765/send_photo  -H 'Content-Type: application/json' -d '{"photo":"/tmp/img.jpg","caption":"optional"}'
 curl -X POST http://127.0.0.1:8765/send_video  -H 'Content-Type: application/json' -d '{"video":"/tmp/clip.mp4","caption":"optional"}'
 ```
 
+`/send` accepts an optional `parse_mode` field (`"HTML"` or `"MarkdownV2"`). Omit for plain text.
+
 ## Systemd service
 
+**Service name: `telegram_bot`**
+
 ```bash
+# Install (one-time)
 sudo cp telegram_bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now telegram_bot
+
+# Daily operations
+sudo systemctl status telegram_bot
+sudo systemctl restart telegram_bot
+sudo systemctl stop telegram_bot
 sudo journalctl -u telegram_bot -f
 ```
 

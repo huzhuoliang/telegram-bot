@@ -117,10 +117,18 @@ Both backends support inline media delivery — Claude can respond with `[PHOTO:
 
 ## Running as a systemd service
 
+**Service name: `telegram_bot`**
+
 ```bash
+# Install (one-time)
 sudo cp telegram_bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now telegram_bot
+
+# Daily operations
+sudo systemctl status telegram_bot
+sudo systemctl restart telegram_bot
+sudo systemctl stop telegram_bot
 sudo journalctl -u telegram_bot -f
 ```
 
