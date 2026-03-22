@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram Bot Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=huzhuoliang
+WorkingDirectory=/home/huzhuoliang/claude-workspace/telegram_monitor
+ExecStart=/usr/bin/python3 /home/huzhuoliang/claude-workspace/telegram_monitor/bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# ANTHROPIC_API_KEY stored in a file readable only by root (chmod 600)
+# Create with: echo "ANTHROPIC_API_KEY=sk-ant-..." | sudo tee /etc/telegram_bot.env
+# Then: sudo chmod 600 /etc/telegram_bot.env
+EnvironmentFile=/etc/telegram_bot.env
+
+[Install]
+WantedBy=multi-user.target

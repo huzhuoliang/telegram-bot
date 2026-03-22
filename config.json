@@ -1,0 +1,16 @@
+{
+  "presets": {
+    "help": "Commands:\n• `!<cmd>` — run shell command\n• `?<question>` — ask Claude\n• Preset keywords: ping, status, help",
+    "status": "Bot is running.",
+    "ping": "pong"
+  },
+  "notify_port": 8765,
+  "poll_interval": 2,
+  "shell_timeout": 30,
+  "shell_output_max_chars": 3000,
+  "claude_backend": "cli",
+  "claude_model": "claude-sonnet-4-6",
+  "claude_max_tokens": 1024,
+  "claude_history_turns": 6,
+  "claude_cli_timeout": 60
+}

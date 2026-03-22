@@ -1,0 +1,6 @@
+TOKEN.txt
+CHAT_ID.txt
+*.log
+__pycache__/
+*.pyc
+.env
