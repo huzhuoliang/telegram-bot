@@ -3,9 +3,10 @@
 
 Usage:
     python3 send.py "Your message here"
-    python3 send.py --photo /path/to/image.png
     python3 send.py --photo /path/to/image.png --caption "Today's report"
-    python3 send.py --photo "https://example.com/img.png" --caption "From web"
+    python3 send.py --photo "https://example.com/img.png"
+    python3 send.py --video /path/to/video.mp4 --caption "Recording"
+    python3 send.py --video "https://example.com/clip.mp4"
     python3 send.py --port 8765 "message"
 """
 
@@ -32,17 +33,22 @@ def main():
     parser = argparse.ArgumentParser(description="Send a Telegram notification via the local bot")
     parser.add_argument("text", nargs="?", help="Message text to send")
     parser.add_argument("--photo", help="Photo to send: local file path or URL")
-    parser.add_argument("--caption", default="", help="Caption for the photo")
+    parser.add_argument("--video", help="Video to send: local file path or URL")
+    parser.add_argument("--caption", default="", help="Caption for photo or video")
     parser.add_argument("--port", type=int, default=8765, help="Notify server port (default: 8765)")
     args = parser.parse_args()
 
-    if not args.text and not args.photo:
-        parser.error("Provide a message text or --photo")
+    if not args.text and not args.photo and not args.video:
+        parser.error("Provide a message text, --photo, or --video")
+    if args.photo and args.video:
+        parser.error("--photo and --video are mutually exclusive")
 
     base = f"http://127.0.0.1:{args.port}"
     try:
         if args.photo:
             status = post(f"{base}/send_photo", {"photo": args.photo, "caption": args.caption})
+        elif args.video:
+            status = post(f"{base}/send_video", {"video": args.video, "caption": args.caption})
         else:
             status = post(f"{base}/send", {"text": args.text})
 

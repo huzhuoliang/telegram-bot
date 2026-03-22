@@ -4,6 +4,8 @@ Endpoints:
   POST /send        {"text": "message text"}
   POST /send_photo  {"photo": "/path/to/file.png", "caption": "optional"}
                     {"photo": "https://...",        "caption": "optional"}
+  POST /send_video  {"video": "/path/to/file.mp4", "caption": "optional"}
+                    {"video": "https://...",        "caption": "optional"}
 """
 
 import json
@@ -43,8 +45,15 @@ class _NotifyHandler(BaseHTTPRequestHandler):
             if not photo:
                 self._respond(400, b"Missing 'photo'")
                 return
-            caption = data.get("caption", "")
-            ok = self.telegram_client.send_photo(photo, caption)
+            ok = self.telegram_client.send_photo(photo, data.get("caption", ""))
+            self._respond(200 if ok else 500, b"ok" if ok else b"send failed")
+
+        elif self.path == "/send_video":
+            video = data.get("video", "")
+            if not video:
+                self._respond(400, b"Missing 'video'")
+                return
+            ok = self.telegram_client.send_video(video, data.get("caption", ""))
             self._respond(200 if ok else 500, b"ok" if ok else b"send failed")
 
         else:

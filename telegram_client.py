@@ -72,6 +72,35 @@ class TelegramClient:
             logger.warning("sendPhoto exception: %s", e)
             return False
 
+    def send_video(self, video: str, caption: str = "") -> bool:
+        """Send a video. `video` can be a local file path or an HTTP(S) URL.
+        Never raises; returns True on success."""
+        payload = {"chat_id": self.chat_id}
+        if caption:
+            payload["caption"] = caption
+        try:
+            if video.startswith("http://") or video.startswith("https://"):
+                resp = self._session.post(
+                    self._url("sendVideo"),
+                    json={**payload, "video": video},
+                    timeout=60,
+                )
+            else:
+                with open(video, "rb") as f:
+                    resp = self._session.post(
+                        self._url("sendVideo"),
+                        data=payload,
+                        files={"video": f},
+                        timeout=120,
+                    )
+            if not resp.ok:
+                logger.warning("sendVideo failed: %s %s", resp.status_code, resp.text[:200])
+                return False
+            return True
+        except Exception as e:
+            logger.warning("sendVideo exception: %s", e)
+            return False
+
     def get_updates(self, offset: int, timeout: int = 30) -> list:
         """Long-poll for new updates. Returns list of update dicts, [] on error."""
         params = {
