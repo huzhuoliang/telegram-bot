@@ -9,11 +9,16 @@ python3 bot.py
 python3 bot.py --config /path/to/config.json
 ```
 
-Send a notification from the CLI or other scripts:
+Send notifications from the CLI or other scripts:
 ```bash
 python3 send.py "Backup completed"
-# or via HTTP
-curl -X POST http://127.0.0.1:8765/send -H 'Content-Type: application/json' -d '{"text":"hello"}'
+python3 send.py --photo /tmp/screenshot.png --caption "说明"
+python3 send.py --video /tmp/recording.mp4 --caption "说明"
+
+# HTTP endpoints
+curl -X POST http://127.0.0.1:8765/send       -H 'Content-Type: application/json' -d '{"text":"hello"}'
+curl -X POST http://127.0.0.1:8765/send_photo  -H 'Content-Type: application/json' -d '{"photo":"/tmp/img.jpg","caption":"optional"}'
+curl -X POST http://127.0.0.1:8765/send_video  -H 'Content-Type: application/json' -d '{"video":"/tmp/clip.mp4","caption":"optional"}'
 ```
 
 ## Systemd service

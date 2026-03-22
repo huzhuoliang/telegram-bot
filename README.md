@@ -4,7 +4,7 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 
 ## Features
 
-- **Notifications** — other scripts/apps POST to a local HTTP endpoint to send messages
+- **Notifications** — other scripts/apps POST to a local HTTP endpoint to send messages, photos, or videos
 - **Shell execution** — send `!<command>` to run it on the server and get output back
 - **Claude AI** — send `?<question>` (or any text) to get an AI response
 - **Preset replies** — configure fixed keyword → response pairs
@@ -52,16 +52,35 @@ Send messages to your bot in Telegram:
 
 ## Sending notifications from other scripts
 
-While the bot is running, any local process can send a Telegram message:
+While the bot is running, any local process can send messages, photos, or videos:
 
 ```bash
-# CLI helper
+# Text
 python3 send.py "Backup completed successfully"
 
-# HTTP (any language)
+# Photo (local file or URL)
+python3 send.py --photo /tmp/screenshot.png --caption "今日报表"
+python3 send.py --photo "https://example.com/chart.png"
+
+# Video (local file or URL, max 50 MB)
+python3 send.py --video /tmp/recording.mp4 --caption "录像"
+python3 send.py --video "https://example.com/clip.mp4"
+```
+
+HTTP API (accepts local file path or URL for photo/video):
+
+```bash
 curl -X POST http://127.0.0.1:8765/send \
   -H 'Content-Type: application/json' \
   -d '{"text": "Deploy finished"}'
+
+curl -X POST http://127.0.0.1:8765/send_photo \
+  -H 'Content-Type: application/json' \
+  -d '{"photo": "/tmp/img.jpg", "caption": "optional"}'
+
+curl -X POST http://127.0.0.1:8765/send_video \
+  -H 'Content-Type: application/json' \
+  -d '{"video": "/tmp/clip.mp4", "caption": "optional"}'
 ```
 
 ## Configuration
