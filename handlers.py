@@ -3,18 +3,30 @@
 import logging
 import subprocess
 import threading
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 class ShellHandler:
-    def __init__(self, timeout: int = 30, max_chars: int = 3000):
+    def __init__(self, timeout: int = 30, max_chars: int = 3000, cwd: str = None):
         self.timeout = timeout
         self.max_chars = max_chars
+        self.cwd = cwd or str(Path.home())
+
+    def _is_sudo(self, command: str) -> bool:
+        import shlex
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        return bool(tokens) and tokens[0] == "sudo"
 
     def handle(self, command: str) -> str:
         if not command:
             return "Usage: !<shell command>"
+        if self._is_sudo(command):
+            return "Error: sudo is not allowed"
         logger.info("Shell: %s", command)
         try:
             result = subprocess.run(
@@ -23,6 +35,7 @@ class ShellHandler:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                cwd=self.cwd,
             )
             output = result.stdout + result.stderr
             truncated = False
