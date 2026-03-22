@@ -146,7 +146,7 @@ def main():
     notify_thread.start()
 
     logger.info("Bot started (chat_id=%s, notify_port=%d)", chat_id, config.get("notify_port", 8765))
-    client.send_message("Bot started.")
+    client.send_message("服务已启动。")
 
     _shutdown_event.wait()
 

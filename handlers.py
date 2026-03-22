@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 #   [VIDEO: <url_or_path> | <caption>]
 _ACTION_RE = re.compile(r'\[(PHOTO|VIDEO):\s*([^\]|]+?)(?:\s*\|\s*([^\]]*))?\]')
 
-_SYSTEM_PROMPT = """You are a helpful assistant running as a Telegram bot on the user's personal server. Be concise. Telegram supports basic Markdown.
+_SYSTEM_PROMPT = """You are a helpful assistant running as a Telegram bot on the user's personal server. Always respond in Chinese (中文), unless the content is inherently non-Chinese such as code, shell output, or technical strings. Be concise. Telegram supports basic Markdown.
 
 RULES:
 1. Every response MUST contain at least one sentence of text.
@@ -55,9 +55,9 @@ class ShellHandler:
 
     def handle(self, command: str) -> str:
         if not command:
-            return "Usage: !<shell command>"
+            return "用法：!<shell 命令>"
         if self._is_sudo(command):
-            return "Error: sudo is not allowed"
+            return "错误：不允许使用 sudo"
         logger.info("Shell: %s", command)
         try:
             result = subprocess.run(
@@ -78,9 +78,9 @@ class ShellHandler:
                 reply += f"\n[truncated at {self.max_chars} chars]"
             return reply.strip()
         except subprocess.TimeoutExpired:
-            return f"Command timed out after {self.timeout}s"
+            return f"命令执行超时（{self.timeout} 秒）"
         except Exception as e:
-            return f"Error: {e}"
+            return f"错误：{e}"
 
 
 class ClaudeHandler:
@@ -151,7 +151,7 @@ class ClaudeHandler:
             text=True,
             timeout=self.cli_timeout,
         )
-        raw = result.stdout.strip() or result.stderr.strip() or "No response"
+        raw = result.stdout.strip() or result.stderr.strip() or "（无响应）"
         logger.info("Claude raw response: %s", raw[:300])
         return self._execute_actions(raw)
 
@@ -176,7 +176,7 @@ class ClaudeHandler:
 
     def handle(self, text: str) -> str:
         if not text:
-            return "Usage: ?<question>"
+            return "用法：?<问题>"
         logger.info("Claude [%s]: %s", self.backend, text[:80])
         processing_msg_id = None
         if self._telegram_client:
@@ -188,14 +188,14 @@ class ClaudeHandler:
                 else:
                     reply = self._call_cli(text)
             except subprocess.TimeoutExpired:
-                reply = f"Claude CLI timed out after {self.cli_timeout}s"
+                reply = f"Claude 响应超时（{self.cli_timeout} 秒）"
             except FileNotFoundError:
-                reply = "Error: `claude` CLI not found in PATH"
+                reply = "错误：PATH 中未找到 claude 命令"
             except Exception as e:
                 if self.backend == "api" and self._history and self._history[-1]["role"] == "user":
                     self._history.pop()  # roll back poisoned history entry
                 logger.warning("Claude error: %s", e)
-                reply = f"Claude error: {e}"
+                reply = f"Claude 错误：{e}"
         if processing_msg_id and self._telegram_client:
             self._telegram_client.delete_message(processing_msg_id)
         return reply
@@ -203,7 +203,7 @@ class ClaudeHandler:
     def clear_history(self) -> str:
         with self._lock:
             self._history.clear()
-        return "Conversation history cleared."
+        return "对话历史已清除。"
 
 
 class PresetHandler:
