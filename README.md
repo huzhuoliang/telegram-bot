@@ -6,8 +6,9 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 
 - **Notifications** — other scripts/apps POST to a local HTTP endpoint to send messages, photos, or videos
 - **Shell execution** — send `!<command>` to run it on the server and get output back
-- **Claude AI** — send `?<question>` (or any text) to get an AI response
+- **Claude AI** — send `?<question>` (or any text) to get an AI response; Claude can also search and send photos/videos inline
 - **Preset replies** — configure fixed keyword → response pairs
+- **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically
 - **No public IP needed** — uses long-polling, no webhook required
 
 ## Prerequisites
@@ -35,7 +36,7 @@ To find your chat ID: start a conversation with your bot, then visit
 python3 bot.py
 ```
 
-The bot sends "Bot started." to your Telegram when it's ready.
+The bot sends "服务已启动。" to your Telegram when it's ready.
 
 ## Usage
 
@@ -44,11 +45,14 @@ Send messages to your bot in Telegram:
 | Message | Action |
 |---------|--------|
 | `!ls -la /tmp` | Runs shell command, returns stdout + stderr + exit code |
-| `?explain DNS` | Asks Claude, returns response |
+| `?explain DNS` | Asks Claude, returns response in Chinese |
+| `搜索一张杨幂的照片` | Claude finds a photo and sends it to you |
 | `ping` | Returns `pong` (preset) |
 | `help` | Returns command reference (preset) |
-| `!clear` | Clears Claude conversation history |
+| `!clear` or `/clear` | Clears Claude conversation history |
 | any other text | Forwarded to Claude |
+
+**Forwarding media:** Send or forward any photo, video, or document to the bot — it will be saved to `~/telegram_archive/` on the server and the bot will confirm with the saved path.
 
 ## Sending notifications from other scripts
 
@@ -91,11 +95,14 @@ Edit `config.json` to customize behavior:
 {
   "presets": {
     "ping": "pong",
-    "status": "All systems operational."
+    "status": "服务运行中。"
   },
+  "proxy": "http://127.0.0.1:2080",
+  "archive_dir": "~/telegram_archive",
   "notify_port": 8765,
   "shell_timeout": 30,
-  "claude_backend": "cli"
+  "claude_backend": "cli",
+  "claude_cli_timeout": 120
 }
 ```
 
@@ -103,8 +110,10 @@ Edit `config.json` to customize behavior:
 
 | `claude_backend` | Description |
 |---|---|
-| `"cli"` (default) | Uses `claude -p` CLI. Requires Claude Code to be installed and logged in. No API key needed. |
-| `"api"` | Uses Anthropic SDK directly. Requires `ANTHROPIC_API_KEY` env var. Supports conversation history. |
+| `"cli"` (default) | Uses `claude -p` CLI. Requires Claude Code to be installed and logged in. No API key needed. Stateless (no conversation history). |
+| `"api"` | Uses Anthropic SDK directly. Requires `ANTHROPIC_API_KEY` env var. Supports rolling conversation history. |
+
+Both backends support inline media delivery — Claude can respond with `[PHOTO: url]` markers that are automatically fetched and sent to you.
 
 ## Running as a systemd service
 

@@ -39,9 +39,11 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ```
 bot.py              — entry point: threads, signal handling, startup/shutdown
-telegram_client.py  — Telegram Bot API wrapper (30s long-poll, message chunking)
-router.py           — chat_id auth gate + prefix dispatch
-handlers.py         — ShellHandler, ClaudeHandler (cli/api), PresetHandler
+telegram_client.py  — Telegram Bot API wrapper (long-poll, send/delete message,
+                      send photo/video with URL→download fallback, download file)
+router.py           — chat_id auth gate + message type dispatch
+handlers.py         — ShellHandler, ClaudeHandler (cli/api), PresetHandler,
+                      MediaArchiveHandler
 notify_server.py    — localhost:8765 HTTP server for outbound notifications
 send.py             — CLI helper to POST to notify server (stdlib only)
 config.json         — presets, timeouts, model/backend settings
@@ -56,13 +58,16 @@ telegram_bot.service — systemd unit
 
 Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 
-| Prefix / pattern | Handler |
+| Input | Handler |
 |---|---|
-| `!<cmd>` | ShellHandler — subprocess, stdout+stderr, exit code |
-| `?<text>` | ClaudeHandler |
+| Photo / video / document message | MediaArchiveHandler — saves to `archive_dir` |
 | `!clear` or `/clear` | Clears Claude conversation history |
-| preset keyword | PresetHandler — dict lookup from config.json |
-| anything else | ClaudeHandler (default fallback) |
+| `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
+| `?<text>` | ClaudeHandler |
+| Preset keyword | PresetHandler — dict lookup from config.json |
+| Anything else | ClaudeHandler (default fallback) |
+
+Special commands are checked before prefix dispatch to avoid `!clear` being treated as a shell command.
 
 ## Claude backends (handlers.py)
 
@@ -71,11 +76,40 @@ Controlled by `claude_backend` in `config.json`:
 - `"cli"` (default) — runs `claude -p <text>` subprocess. Uses existing Claude Code credentials. No API key needed. Stateless (no history).
 - `"api"` — uses `anthropic` SDK directly. Requires `ANTHROPIC_API_KEY`. Maintains rolling conversation history (`claude_history_turns` turns). `anthropic` import is lazy (only loaded when this backend is active).
 
+Both backends:
+- Send `⏳ 处理中...` before calling the backend, delete it on completion
+- Parse `[PHOTO: url]` / `[VIDEO: url]` markers from Claude's response and send media automatically
+- Always respond in Chinese (except code, shell output, technical strings)
+
+### Claude action markers
+
+Claude can embed these in its response to trigger media delivery:
+```
+[PHOTO: <url_or_path>]
+[PHOTO: <url_or_path> | <caption>]
+[VIDEO: <url_or_path>]
+[VIDEO: <url_or_path> | <caption>]
+```
+
+For URLs that Telegram can't fetch directly (e.g. Wikipedia), `telegram_client` automatically downloads via local proxy and uploads as file.
+
+## Media archive (handlers.py `MediaArchiveHandler`)
+
+Incoming photos/videos/documents are saved to `archive_dir`:
+```
+~/telegram_archive/
+├── photos/     YYYY-MM-DD_HH-MM-SS.jpg
+├── videos/     YYYY-MM-DD_HH-MM-SS.<ext>
+└── documents/  <original filename>
+```
+
 ## config.json reference
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `presets` | `{}` | Keyword → response mapping (case-insensitive) |
+| `proxy` | `""` | HTTP proxy for Telegram API (e.g. `http://127.0.0.1:2080`) |
+| `archive_dir` | `"~/telegram_archive"` | Directory for saved incoming media |
 | `notify_port` | `8765` | Port for local HTTP notification server |
 | `poll_interval` | `2` | Seconds to wait between retries on polling error |
 | `shell_timeout` | `30` | Max seconds for shell command execution |
@@ -84,6 +118,6 @@ Controlled by `claude_backend` in `config.json`:
 | `claude_model` | `"claude-sonnet-4-6"` | Model (used by `api` backend only) |
 | `claude_max_tokens` | `1024` | Max tokens (used by `api` backend only) |
 | `claude_history_turns` | `6` | Rolling history window (used by `api` backend only) |
-| `claude_cli_timeout` | `60` | Subprocess timeout for `cli` backend |
+| `claude_cli_timeout` | `120` | Subprocess timeout for `cli` backend |
 | `log_file` | (none) | Optional log file path; stdout only if omitted |
 | `log_level` | `"INFO"` | Logging level |
