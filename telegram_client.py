@@ -60,7 +60,8 @@ class TelegramClient:
     def _download_and_upload_photo(self, url: str, payload: dict) -> bool:
         """Fallback: download image via local proxy, upload as file to Telegram."""
         try:
-            dl = self._session.get(url, timeout=30)
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
+            dl = self._session.get(url, timeout=30, headers=headers)
             dl.raise_for_status()
             resp = self._session.post(
                 self._url("sendPhoto"),
@@ -128,7 +129,8 @@ class TelegramClient:
                     return True
                 logger.info("sendVideo URL failed (%s), trying download+upload fallback", resp.status_code)
                 try:
-                    dl = self._session.get(video, timeout=60)
+                    headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
+                    dl = self._session.get(video, timeout=60, headers=headers)
                     dl.raise_for_status()
                     resp = self._session.post(
                         self._url("sendVideo"),
