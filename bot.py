@@ -78,7 +78,7 @@ def polling_loop(client: TelegramClient, router: Router, poll_interval: int):
             updates = client.get_updates(offset, timeout=30)
             for update in updates:
                 offset = update["update_id"] + 1
-                try:
+try:
                     reply = router.route(update)
                     if reply:
                         client.send_message(reply)
@@ -99,6 +99,11 @@ def main():
     setup_logging(config.get("log_file"), config.get("log_level", "INFO"))
     logger = logging.getLogger("bot")
 
+    # Load API key from api_key.txt if present (takes precedence over env)
+    key_file = BASE_DIR / "api_key.txt"
+    if key_file.exists():
+        os.environ["ANTHROPIC_API_KEY"] = key_file.read_text().strip()
+
     claude_backend = config.get("claude_backend", "cli")
     if claude_backend == "api" and not os.environ.get("ANTHROPIC_API_KEY"):
         logger.warning("ANTHROPIC_API_KEY not set — Claude API backend will fail on use")
@@ -117,6 +122,7 @@ def main():
         history_turns=config.get("claude_history_turns", 6),
         cli_timeout=config.get("claude_cli_timeout", 60),
         telegram_client=client,
+        allowed_commands=config.get("claude_allowed_commands", []),
     )
     preset_handler = PresetHandler(config.get("presets", {}))
     media_archive_handler = MediaArchiveHandler(
@@ -124,7 +130,8 @@ def main():
         telegram_client=client,
     )
     router = Router(chat_id, shell_handler, claude_handler, preset_handler,
-                    media_archive_handler=media_archive_handler)
+                    media_archive_handler=media_archive_handler,
+                    config_path=args.config)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)

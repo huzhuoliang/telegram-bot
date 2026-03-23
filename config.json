@@ -14,5 +14,6 @@
   "claude_model": "claude-sonnet-4-6",
   "claude_max_tokens": 1024,
   "claude_history_turns": 6,
-  "claude_cli_timeout": 120
+  "claude_cli_timeout": 120,
+  "claude_allowed_commands": []
 }

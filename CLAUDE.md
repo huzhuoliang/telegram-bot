@@ -65,6 +65,8 @@ telegram_bot.service — systemd unit
 
 **Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
 
+**getUpdates transport:** uses POST + JSON body (not GET + query params). Telegram does not reliably parse `allowed_updates` when sent as repeated GET params.
+
 ## Message routing (router.py)
 
 Messages from any chat other than `CHAT_ID.txt` are silently dropped.
@@ -72,6 +74,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | Input | Handler |
 |---|---|
 | Photo / video / document message | MediaArchiveHandler — saves to `archive_dir` |
+| Emoji reaction on a message | Replies with the same emoji(s) |
 | `!clear` or `/clear` | Clears Claude conversation history |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `?<text>` | ClaudeHandler |

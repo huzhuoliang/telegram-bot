@@ -7,15 +7,30 @@ logger = logging.getLogger(__name__)
 
 class Router:
     def __init__(self, chat_id: str, shell_handler, claude_handler, preset_handler,
-                 media_archive_handler=None):
+                 media_archive_handler=None, config_path: str = None):
         self.chat_id = str(chat_id).strip()
         self.shell = shell_handler
         self.claude = claude_handler
         self.preset = preset_handler
         self.media_archive = media_archive_handler
+        self.config_path = config_path
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
+
+        # Message reaction
+        reaction = update.get("message_reaction")
+        if reaction:
+            chat_id = str(reaction.get("chat", {}).get("id", ""))
+            if chat_id != self.chat_id:
+                return None
+            new_reactions = reaction.get("new_reaction", [])
+            emojis = [r["emoji"] for r in new_reactions if r.get("type") == "emoji"]
+            if emojis:
+                logger.info("Reaction on msg#%s: %s", reaction.get("message_id"), " ".join(emojis))
+                return " ".join(emojis)
+            return None
+
         message = update.get("message") or update.get("edited_message")
         if not message:
             return None
@@ -40,6 +55,21 @@ class Router:
         # Special commands (must be checked before prefix dispatch)
         if text.lower() in ("!clear", "/clear"):
             return self.claude.clear_history()
+
+        if text.lower().startswith("/setkey "):
+            api_key = text[8:].strip()
+            if not api_key:
+                return "用法：/setkey &lt;ANTHROPIC_API_KEY&gt;"
+            return self.claude.configure_api_backend(api_key, self.config_path)
+
+        if text.lower() == "/setcli":
+            return self.claude.configure_cli_backend(self.config_path)
+
+        if text.lower() == "/status":
+            return self.claude.status()
+
+        if text.lower() == "/help":
+            return self.claude.help()
 
         # !cmd → shell
         if text.startswith("!"):

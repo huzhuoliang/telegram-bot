@@ -1,5 +1,6 @@
 TOKEN.txt
 CHAT_ID.txt
+api_key.txt
 *.log
 __pycache__/
 *.pyc

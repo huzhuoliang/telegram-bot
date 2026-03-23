@@ -188,15 +188,15 @@ class TelegramClient:
 
     def get_updates(self, offset: int, timeout: int = 30) -> list:
         """Long-poll for new updates. Returns list of update dicts, [] on error."""
-        params = {
+        payload = {
             "offset": offset,
             "timeout": timeout,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "message_reaction"],
         }
         try:
-            resp = self._session.get(
+            resp = self._session.post(
                 self._url("getUpdates"),
-                params=params,
+                json=payload,
                 timeout=(10, timeout + 5),  # connect=10s, read=timeout+5s
             )
             if resp.ok:
