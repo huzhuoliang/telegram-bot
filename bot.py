@@ -78,7 +78,7 @@ def polling_loop(client: TelegramClient, router: Router, poll_interval: int):
             updates = client.get_updates(offset, timeout=30)
             for update in updates:
                 offset = update["update_id"] + 1
-try:
+                try:
                     reply = router.route(update)
                     if reply:
                         client.send_message(reply)
