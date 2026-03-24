@@ -1255,7 +1255,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             label = labels.get(result, result)
             self._telegram_client.edit_message_keyboard(
                 msg_id,
-                f"🔐 <b>特权 AI 请求执行命令：</b>\n\n<pre>{safe}</pre>\n\n{label}",
+                f"🔐 <b>请求执行命令：</b>\n\n<pre>{safe}</pre>\n\n{label}",
                 {"inline_keyboard": []},
                 parse_mode="HTML",
             )
@@ -1276,7 +1276,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         if self._telegram_client:
             safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             msg = (
-                f"🔐 <b>特权 AI 请求执行命令：</b>\n\n"
+                f"🔐 <b>请求执行命令：</b>\n\n"
                 f"<pre>{safe}</pre>\n\n"
                 f"<i>（{TIMEOUT} 秒后自动拒绝）</i>"
             )
