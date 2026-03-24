@@ -279,6 +279,8 @@ class ClaudeHandler:
         self._history: list[dict] = []
         self._lock = threading.Lock()
         self._api_client = None  # lazy-init only if backend == "api"
+        self._session_input_tokens = 0
+        self._session_output_tokens = 0
 
     def _get_api_client(self):
         if self._api_client is None:
@@ -563,6 +565,17 @@ class ClaudeHandler:
             logger.warning("Removing orphaned tool_use from history tail")
             self._history.pop()
 
+    _CTX_WINDOW = 200_000  # claude-sonnet-4-6 context window
+
+    def _append_usage(self, text: str, input_tokens: int, output_tokens: int) -> str:
+        ctx_pct = input_tokens / self._CTX_WINDOW * 100
+        stats = (
+            f"\n<code>━━━\n"
+            f"📊 in {input_tokens:,} · out {output_tokens:,} · ctx {ctx_pct:.1f}%\n"
+            f"💰 session in {self._session_input_tokens:,} / out {self._session_output_tokens:,}</code>"
+        )
+        return text + stats
+
     def _call_api(self, text: str, image_data: bytes = None) -> str:
         # history is already locked by caller.
         # Save state so we can roll back on any error.
@@ -598,6 +611,9 @@ class ClaudeHandler:
             client = self._get_api_client()
             tools = self._build_tools()
 
+            last_input_tokens = 0
+            total_output_tokens = 0
+
             for _ in range(5):  # max 5 tool-call rounds
                 response = client.messages.create(
                     model=self.model,
@@ -606,6 +622,8 @@ class ClaudeHandler:
                     messages=self._history,
                     tools=tools,
                 )
+                last_input_tokens = response.usage.input_tokens
+                total_output_tokens += response.usage.output_tokens
 
                 # Collect text and tool_use blocks
                 text_parts = []
@@ -622,7 +640,9 @@ class ClaudeHandler:
                     logger.info("Claude raw response (stop=%s): %s", response.stop_reason, raw[:500])
                     cleaned = self._execute_actions(_convert_md_tables(raw))
                     self._history.append({"role": "assistant", "content": response.content})
-                    return cleaned or "已完成。"
+                    self._session_input_tokens += last_input_tokens
+                    self._session_output_tokens += total_output_tokens
+                    return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
                 # Execute tool calls and feed results back
                 self._history.append({"role": "assistant", "content": response.content})
@@ -642,7 +662,9 @@ class ClaudeHandler:
                 block.text for block in response.content if block.type == "text"
             ).strip()
             cleaned = self._execute_actions(_convert_md_tables(raw))
-            return cleaned or "已完成。"
+            self._session_input_tokens += last_input_tokens
+            self._session_output_tokens += total_output_tokens
+            return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
         except Exception:
             self._history = saved_history  # roll back all history changes
