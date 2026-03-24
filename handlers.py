@@ -1151,6 +1151,8 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         self._pending_cmd: str | None = None
         # Busy flag: prevents concurrent $-command execution (protected by _lock)
         self._busy = False
+        # Auto-approve flag: set for the duration of a $$ request (background thread only)
+        self._auto_approve = False
 
     # ------------------------------------------------------------------
     # Whitelist helpers
@@ -1265,6 +1267,15 @@ class PrivilegedClaudeHandler(ClaudeHandler):
     def _request_confirmation(self, cmd: str) -> tuple[bool, bool]:
         """Send a confirmation message with inline buttons and block until clicked or timeout.
         Returns (approved, add_to_whitelist)."""
+        if self._auto_approve:
+            if self._telegram_client:
+                safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                self._telegram_client.send_message(
+                    f"⚡ 自动执行：<code>{safe}</code>", parse_mode="HTML"
+                )
+            logger.info("Privileged CMD (auto-approve): %s", cmd)
+            return True, False
+
         TIMEOUT = 60
         event = threading.Event()
         with self._pending_lock:
@@ -1397,7 +1408,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
 
         return super()._handle_tool_call(tool_name, tool_input)
 
-    def handle(self, text: str) -> str | None:
+    def handle(self, text: str, auto_approve: bool = False) -> str | None:
         if not text:
             return self._send_html("用法：<code>$&lt;指令&gt;</code>")
         with self._lock:
@@ -1406,9 +1417,11 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             self._busy = True
 
         def _run():
+            self._auto_approve = auto_approve
             try:
                 super(PrivilegedClaudeHandler, self).handle(text)
             finally:
+                self._auto_approve = False
                 with self._lock:
                     self._busy = False
 

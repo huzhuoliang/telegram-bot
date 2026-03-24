@@ -117,6 +117,9 @@ class Router:
             inner = text[1:].strip()
             if inner.lower().startswith("whitelist"):
                 return self.privileged_claude.handle_whitelist_cmd(inner[9:].strip())
+            # $$ prefix: auto-approve mode (inner starts with another $)
+            if inner.startswith("$"):
+                return self.privileged_claude.handle(inner[1:].strip(), auto_approve=True)
             return self.privileged_claude.handle(inner)
 
         # ?question → Claude
