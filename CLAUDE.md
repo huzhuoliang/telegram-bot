@@ -81,8 +81,9 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | `$clear` | Clears privileged Claude conversation history |
 | `/ctx` | ClaudeHandler.context_stats() — context window breakdown (api only) |
 | `$ctx` | PrivilegedClaudeHandler.context_stats() — privileged context breakdown (api only) |
+| `$whitelist <list\|add\|remove>` | PrivilegedClaudeHandler.handle_whitelist_cmd() — manage shell whitelist |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
-| `$<text>` | PrivilegedClaudeHandler — unrestricted shell/file access (api backend only) |
+| `$<text>` | PrivilegedClaudeHandler — runs in background thread; shell commands require user confirmation via reaction (👍 once / 📌 whitelist / 👎 reject); whitelisted commands skip confirmation |
 | `?<text>` | ClaudeHandler |
 | Preset keyword | PresetHandler — dict lookup from config.json |
 | Anything else | ClaudeHandler (default fallback) |
@@ -143,5 +144,6 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `privileged_claude_max_tokens` | `4096` | Max tokens for privileged handler |
 | `privileged_claude_history_turns` | `6` | Rolling history window for privileged handler |
 | `privileged_claude_shell_timeout` | `60` | Shell command timeout for privileged handler |
+| `privileged_shell_whitelist` | `[]` | Commands that skip confirmation; suffix `*` = prefix match, exact otherwise |
 | `log_file` | (none) | Optional log file path; stdout only if omitted |
 | `log_level` | `"INFO"` | Logging level |

@@ -10,6 +10,13 @@
 <b>特权 AI</b>
   <code>$指令</code> → 特权 Claude，可执行任意命令（含 sudo）、读写任意文件
   <code>$clear</code> → 清空特权 AI 对话历史
+  执行 shell 命令前会弹出确认消息：
+    👍 允许一次　　📌 允许并加入白名单　　👎 拒绝（60秒超时自动拒绝）
+
+<b>特权 AI 白名单</b>
+  <code>$whitelist list</code> → 查看白名单
+  <code>$whitelist add &lt;命令或前缀*&gt;</code> → 添加（如 <code>ls*</code> 表示前缀匹配）
+  <code>$whitelist remove &lt;序号&gt;</code> → 按序号删除
 
 <b>管理命令</b>
   <code>/help</code> — 显示此帮助

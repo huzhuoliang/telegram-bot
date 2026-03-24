@@ -1109,6 +1109,7 @@ OPERATING PRINCIPLES:
 4. If a command needs sudo and fails due to permissions, clearly say so and suggest the sudoers fix.
 5. Every response must include at least one sentence of plain Chinese text.
 6. Escape HTML in user-supplied content echoed back: & → &amp;  < → &lt;  > → &gt;
+7. If a tool result starts with "REJECTED:", the user has explicitly refused this operation. Stop immediately, report the refusal in Chinese, and do NOT suggest alternatives or retry.
 """
 
 
@@ -1126,6 +1127,8 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         history_turns: int = 6,
         shell_timeout: int = 60,
         telegram_client=None,
+        shell_whitelist: list[str] | None = None,
+        config_path: str | None = None,
     ):
         super().__init__(
             backend="api",
@@ -1138,6 +1141,143 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         )
         self._shell_timeout = shell_timeout
         self._system_prompt = _SYSTEM_PROMPT_PRIVILEGED
+        self._shell_whitelist: list[str] = list(shell_whitelist or [])
+        self._config_path = config_path
+        # Pending confirmation state (protected by _pending_lock)
+        self._pending_lock = threading.Lock()
+        self._pending_event: threading.Event | None = None
+        self._pending_result: str | None = None   # "approve" | "whitelist" | "reject"
+        self._pending_msg_id: int | None = None
+        # Busy flag: prevents concurrent $-command execution (protected by _lock)
+        self._busy = False
+
+    # ------------------------------------------------------------------
+    # Whitelist helpers
+    # ------------------------------------------------------------------
+
+    def _is_whitelisted(self, cmd: str) -> bool:
+        for pattern in self._shell_whitelist:
+            if pattern.endswith("*"):
+                if cmd.startswith(pattern[:-1]):
+                    return True
+            elif cmd == pattern:
+                return True
+        return False
+
+    def _save_whitelist(self):
+        if not self._config_path:
+            return
+        try:
+            with open(self._config_path) as f:
+                cfg = json.load(f)
+            cfg["privileged_shell_whitelist"] = self._shell_whitelist
+            with open(self._config_path, "w") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning("Failed to save whitelist to config: %s", e)
+
+    def handle_whitelist_cmd(self, args: str) -> str:
+        parts = args.strip().split(None, 1)
+        sub = parts[0].lower() if parts else ""
+
+        if not sub or sub == "list":
+            if not self._shell_whitelist:
+                return self._send_html("白名单为空。")
+            lines = ["<b>Shell 命令白名单：</b>"]
+            for i, p in enumerate(self._shell_whitelist, 1):
+                tag = "（前缀匹配）" if p.endswith("*") else "（精确匹配）"
+                safe = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(f"  {i}. <code>{safe}</code> {tag}")
+            return self._send_html("\n".join(lines))
+
+        if sub == "add":
+            pattern = parts[1].strip() if len(parts) > 1 else ""
+            if not pattern:
+                return self._send_html("用法：<code>$whitelist add &lt;命令或前缀*&gt;</code>")
+            if pattern in self._shell_whitelist:
+                safe = pattern.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                return self._send_html(f"<code>{safe}</code> 已在白名单中。")
+            self._shell_whitelist.append(pattern)
+            self._save_whitelist()
+            safe = pattern.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            tag = "（前缀匹配）" if pattern.endswith("*") else "（精确匹配）"
+            return self._send_html(f"✅ 已添加到白名单：<code>{safe}</code> {tag}")
+
+        if sub == "remove":
+            idx_str = parts[1].strip() if len(parts) > 1 else ""
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                return self._send_html("用法：<code>$whitelist remove &lt;序号&gt;</code>")
+            if idx < 1 or idx > len(self._shell_whitelist):
+                return self._send_html(f"序号超出范围，当前白名单共 {len(self._shell_whitelist)} 条。")
+            removed = self._shell_whitelist.pop(idx - 1)
+            self._save_whitelist()
+            safe = removed.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return self._send_html(f"✅ 已从白名单移除：<code>{safe}</code>")
+
+        return self._send_html(
+            "用法：\n"
+            "<code>$whitelist list</code> — 查看白名单\n"
+            "<code>$whitelist add &lt;命令或前缀*&gt;</code> — 添加\n"
+            "<code>$whitelist remove &lt;序号&gt;</code> — 删除"
+        )
+
+    # ------------------------------------------------------------------
+    # Pending confirmation (called from router's reaction handler)
+    # ------------------------------------------------------------------
+
+    def has_pending(self, msg_id: int) -> bool:
+        """Return True if there is a confirmation waiting for this message_id."""
+        with self._pending_lock:
+            return self._pending_msg_id is not None and self._pending_msg_id == msg_id
+
+    def resolve_pending(self, result: str) -> bool:
+        """Signal the pending confirmation. result: 'approve' | 'whitelist' | 'reject'."""
+        with self._pending_lock:
+            if self._pending_event is None:
+                return False
+            self._pending_result = result
+            self._pending_event.set()
+        return True
+
+    def _request_confirmation(self, cmd: str) -> tuple[bool, bool]:
+        """Send a confirmation message and block until the user reacts or timeout.
+        Returns (approved, add_to_whitelist)."""
+        TIMEOUT = 60
+        event = threading.Event()
+        with self._pending_lock:
+            self._pending_event = event
+            self._pending_result = None
+            self._pending_msg_id = None
+
+        if self._telegram_client:
+            safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            msg = (
+                f"🔐 <b>特权 AI 请求执行命令：</b>\n\n"
+                f"<pre>{safe}</pre>\n"
+                f"👍 允许一次　　📌 允许并加入白名单　　👎 拒绝\n"
+                f"<i>（{TIMEOUT} 秒后自动拒绝）</i>"
+            )
+            msg_id = self._telegram_client.send_message(msg, parse_mode="HTML")
+            with self._pending_lock:
+                self._pending_msg_id = msg_id
+
+        triggered = event.wait(timeout=TIMEOUT)
+
+        with self._pending_lock:
+            result = self._pending_result
+            self._pending_event = None
+            self._pending_msg_id = None
+
+        approved = triggered and result in ("approve", "whitelist")
+        if not approved and self._telegram_client:
+            label = "已超时自动拒绝" if not triggered else "用户已拒绝"
+            safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            self._telegram_client.send_message(
+                f"❌ {label}：<code>{safe}</code>", parse_mode="HTML"
+            )
+        return approved, result == "whitelist"
 
     def _build_tools(self) -> list[dict]:
         return [
@@ -1188,7 +1328,17 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             cmd = tool_input.get("command", "").strip()
             if not cmd:
                 return "Error: command is empty"
-            logger.info("Privileged CMD: %s", cmd)
+            if self._is_whitelisted(cmd):
+                logger.info("Privileged CMD (whitelisted): %s", cmd)
+                return _run_privileged_cmd(cmd, timeout=self._shell_timeout)
+            approved, add_to_whitelist = self._request_confirmation(cmd)
+            if not approved:
+                return "REJECTED: User rejected this command."
+            if add_to_whitelist:
+                if cmd not in self._shell_whitelist:
+                    self._shell_whitelist.append(cmd)
+                    self._save_whitelist()
+            logger.info("Privileged CMD (approved): %s", cmd)
             return _run_privileged_cmd(cmd, timeout=self._shell_timeout)
 
         if tool_name == "read_file":
@@ -1219,10 +1369,23 @@ class PrivilegedClaudeHandler(ClaudeHandler):
 
         return super()._handle_tool_call(tool_name, tool_input)
 
-    def handle(self, text: str) -> str:
+    def handle(self, text: str) -> str | None:
         if not text:
             return self._send_html("用法：<code>$&lt;指令&gt;</code>")
-        return super().handle(text)
+        with self._lock:
+            if self._busy:
+                return self._send_html("⚠️ 特权 AI 正在处理另一个请求，请稍后再试。")
+            self._busy = True
+
+        def _run():
+            try:
+                super(PrivilegedClaudeHandler, self).handle(text)
+            finally:
+                with self._lock:
+                    self._busy = False
+
+        threading.Thread(target=_run, daemon=True, name="privileged-ai").start()
+        return None
 
     def clear_history(self) -> str:
         with self._lock:

@@ -37,10 +37,23 @@ class Router:
             chat_id = str(reaction.get("chat", {}).get("id", ""))
             if chat_id != self.chat_id:
                 return None
+            msg_id = reaction.get("message_id")
             new_reactions = reaction.get("new_reaction", [])
             emojis = [r["emoji"] for r in new_reactions if r.get("type") == "emoji"]
+
+            # Route to privileged confirmation if there's a pending approval
+            if emojis and self.privileged_claude and self.privileged_claude.has_pending(msg_id):
+                emoji = emojis[0]
+                if emoji == "👍":
+                    self.privileged_claude.resolve_pending("approve")
+                elif emoji == "📌":
+                    self.privileged_claude.resolve_pending("whitelist")
+                elif emoji == "👎":
+                    self.privileged_claude.resolve_pending("reject")
+                return None
+
             if emojis:
-                logger.info("Reaction on msg#%s: %s", reaction.get("message_id"), " ".join(emojis))
+                logger.info("Reaction on msg#%s: %s", msg_id, " ".join(emojis))
                 return " ".join(emojis)
             return None
 
@@ -107,7 +120,10 @@ class Router:
         if text.startswith("$") and self.privileged_claude:
             if text.lower() == "$ctx":
                 return self.privileged_claude.context_stats()
-            return self.privileged_claude.handle(text[1:].strip())
+            inner = text[1:].strip()
+            if inner.lower().startswith("whitelist"):
+                return self.privileged_claude.handle_whitelist_cmd(inner[9:].strip())
+            return self.privileged_claude.handle(inner)
 
         # ?question → Claude
         if text.startswith("?"):

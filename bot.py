@@ -130,6 +130,8 @@ def main():
         history_turns=config.get("privileged_claude_history_turns", 6),
         shell_timeout=config.get("privileged_claude_shell_timeout", 60),
         telegram_client=client,
+        shell_whitelist=config.get("privileged_shell_whitelist", []),
+        config_path=args.config,
     )
     preset_handler = PresetHandler(config.get("presets", {}))
     media_archive_handler = MediaArchiveHandler(
