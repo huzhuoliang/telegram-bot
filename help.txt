@@ -31,6 +31,7 @@
   发送图片/视频/文件 → 自动存档到服务器
   发送图片 + caption → Claude 识图（仅 api backend）
   让 Claude 发图片或视频 → Claude 会直接发送
+  <code>/files</code> → 浏览归档文件（按类型分页，inline keyboard）
 
 <b>其他</b>
   对消息添加表情反应 → Bot 回复同样的 emoji
