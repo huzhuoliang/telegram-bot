@@ -186,12 +186,70 @@ class TelegramClient:
             logger.warning("download_file exception: %s", e)
             return False
 
+    def send_message_with_keyboard(self, text: str, reply_markup: dict) -> int | None:
+        """Send a message with InlineKeyboardMarkup. Returns message_id or None."""
+        payload = {"chat_id": self.chat_id, "text": text, "reply_markup": reply_markup}
+        try:
+            resp = self._session.post(self._url("sendMessage"), json=payload, timeout=10)
+            if resp.ok:
+                return resp.json().get("result", {}).get("message_id")
+            logger.warning("sendMessage(keyboard) failed: %s %s", resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.warning("sendMessage(keyboard) exception: %s", e)
+        return None
+
+    def edit_message_keyboard(self, message_id: int, text: str, reply_markup: dict) -> bool:
+        """Edit an existing message's text and keyboard in-place."""
+        payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup}
+        try:
+            resp = self._session.post(self._url("editMessageText"), json=payload, timeout=10)
+            if resp.ok:
+                return True
+            if "not modified" in resp.text:
+                return True
+            logger.warning("editMessageText failed: %s %s", resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.warning("editMessageText exception: %s", e)
+        return False
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
+        """Dismiss the loading spinner on an inline button. Must be called within 10s."""
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        try:
+            resp = self._session.post(self._url("answerCallbackQuery"), json=payload, timeout=10)
+            return resp.ok
+        except Exception as e:
+            logger.warning("answerCallbackQuery exception: %s", e)
+            return False
+
+    def send_by_file_id(self, media_type: str, file_id: str, caption: str = "") -> bool:
+        """Re-send an archived file by Telegram file_id (no re-upload). media_type: photo/video/document."""
+        method_map = {"photo": "sendPhoto", "video": "sendVideo", "document": "sendDocument"}
+        field_map = {"photo": "photo", "video": "video", "document": "document"}
+        method = method_map.get(media_type)
+        field = field_map.get(media_type)
+        if not method:
+            return False
+        payload = {"chat_id": self.chat_id, field: file_id}
+        if caption:
+            payload["caption"] = caption
+        try:
+            resp = self._session.post(self._url(method), json=payload, timeout=30)
+            if resp.ok:
+                return True
+            logger.warning("%s(file_id) failed: %s %s", method, resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.warning("%s(file_id) exception: %s", method, e)
+        return False
+
     def get_updates(self, offset: int, timeout: int = 30) -> list:
         """Long-poll for new updates. Returns list of update dicts, [] on error."""
         payload = {
             "offset": offset,
             "timeout": timeout,
-            "allowed_updates": ["message", "message_reaction"],
+            "allowed_updates": ["message", "message_reaction", "callback_query"],
         }
         try:
             resp = self._session.post(
