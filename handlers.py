@@ -1148,6 +1148,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         self._pending_event: threading.Event | None = None
         self._pending_result: str | None = None   # "approve" | "whitelist" | "reject"
         self._pending_msg_id: int | None = None
+        self._pending_cmd: str | None = None
         # Busy flag: prevents concurrent $-command execution (protected by _lock)
         self._busy = False
 
@@ -1227,11 +1228,6 @@ class PrivilegedClaudeHandler(ClaudeHandler):
     # Pending confirmation (called from router's reaction handler)
     # ------------------------------------------------------------------
 
-    def has_pending(self, msg_id: int) -> bool:
-        """Return True if there is a confirmation waiting for this message_id."""
-        with self._pending_lock:
-            return self._pending_msg_id is not None and self._pending_msg_id == msg_id
-
     def resolve_pending(self, result: str) -> bool:
         """Signal the pending confirmation. result: 'approve' | 'whitelist' | 'reject'."""
         with self._pending_lock:
@@ -1241,8 +1237,33 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             self._pending_event.set()
         return True
 
+    def resolve_pending_callback(self, cq_id: str, msg_id: int | None, result: str):
+        """Called from router's callback_query handler. Answers the callback, edits
+        the confirmation message to show the decision, then unblocks the waiting thread."""
+        if self._telegram_client:
+            self._telegram_client.answer_callback_query(cq_id)
+
+        if self._telegram_client and msg_id:
+            with self._pending_lock:
+                cmd = self._pending_cmd or ""
+            safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            labels = {
+                "approve":   "✅ 已允许（一次）",
+                "whitelist": "✅ 已允许并加入白名单",
+                "reject":    "❌ 已拒绝",
+            }
+            label = labels.get(result, result)
+            self._telegram_client.edit_message_keyboard(
+                msg_id,
+                f"🔐 <b>特权 AI 请求执行命令：</b>\n\n<pre>{safe}</pre>\n\n{label}",
+                {"inline_keyboard": []},
+                parse_mode="HTML",
+            )
+
+        self.resolve_pending(result)
+
     def _request_confirmation(self, cmd: str) -> tuple[bool, bool]:
-        """Send a confirmation message and block until the user reacts or timeout.
+        """Send a confirmation message with inline buttons and block until clicked or timeout.
         Returns (approved, add_to_whitelist)."""
         TIMEOUT = 60
         event = threading.Event()
@@ -1250,16 +1271,21 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             self._pending_event = event
             self._pending_result = None
             self._pending_msg_id = None
+            self._pending_cmd = cmd
 
         if self._telegram_client:
             safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             msg = (
                 f"🔐 <b>特权 AI 请求执行命令：</b>\n\n"
-                f"<pre>{safe}</pre>\n"
-                f"👍 允许一次　　📌 允许并加入白名单　　👎 拒绝\n"
+                f"<pre>{safe}</pre>\n\n"
                 f"<i>（{TIMEOUT} 秒后自动拒绝）</i>"
             )
-            msg_id = self._telegram_client.send_message(msg, parse_mode="HTML")
+            markup = {"inline_keyboard": [[
+                {"text": "✅ 允许一次",    "callback_data": "priv:approve"},
+                {"text": "📌 加入白名单", "callback_data": "priv:whitelist"},
+                {"text": "❌ 拒绝",       "callback_data": "priv:reject"},
+            ]]}
+            msg_id = self._telegram_client.send_message_with_keyboard(msg, markup, parse_mode="HTML")
             with self._pending_lock:
                 self._pending_msg_id = msg_id
 
@@ -1269,13 +1295,15 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             result = self._pending_result
             self._pending_event = None
             self._pending_msg_id = None
+            self._pending_cmd = None
 
         approved = triggered and result in ("approve", "whitelist")
-        if not approved and self._telegram_client:
-            label = "已超时自动拒绝" if not triggered else "用户已拒绝"
+        # On timeout, send a separate message (button message was already edited by resolve_pending_callback;
+        # on timeout nobody clicked so we need to notify manually)
+        if not triggered and self._telegram_client:
             safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             self._telegram_client.send_message(
-                f"❌ {label}：<code>{safe}</code>", parse_mode="HTML"
+                f"⏱ 已超时自动拒绝：<code>{safe}</code>", parse_mode="HTML"
             )
         return approved, result == "whitelist"
 

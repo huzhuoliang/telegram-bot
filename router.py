@@ -27,6 +27,12 @@ class Router:
             chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
             if chat_id != self.chat_id:
                 return None
+            data = callback_query.get("data", "")
+            cq_id = callback_query.get("id", "")
+            msg_id = callback_query.get("message", {}).get("message_id")
+            if data.startswith("priv:") and self.privileged_claude:
+                self.privileged_claude.resolve_pending_callback(cq_id, msg_id, data[5:])
+                return None
             if self.file_archive:
                 self.file_archive.handle_callback(callback_query)
             return None
@@ -40,18 +46,6 @@ class Router:
             msg_id = reaction.get("message_id")
             new_reactions = reaction.get("new_reaction", [])
             emojis = [r["emoji"] for r in new_reactions if r.get("type") == "emoji"]
-
-            # Route to privileged confirmation if there's a pending approval
-            if emojis and self.privileged_claude and self.privileged_claude.has_pending(msg_id):
-                emoji = emojis[0]
-                if emoji == "👍":
-                    self.privileged_claude.resolve_pending("approve")
-                elif emoji == "📌":
-                    self.privileged_claude.resolve_pending("whitelist")
-                elif emoji == "👎":
-                    self.privileged_claude.resolve_pending("reject")
-                return None
-
             if emojis:
                 logger.info("Reaction on msg#%s: %s", msg_id, " ".join(emojis))
                 return " ".join(emojis)

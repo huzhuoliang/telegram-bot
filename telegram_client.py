@@ -186,9 +186,11 @@ class TelegramClient:
             logger.warning("download_file exception: %s", e)
             return False
 
-    def send_message_with_keyboard(self, text: str, reply_markup: dict) -> int | None:
+    def send_message_with_keyboard(self, text: str, reply_markup: dict, parse_mode: str = "") -> int | None:
         """Send a message with InlineKeyboardMarkup. Returns message_id or None."""
         payload = {"chat_id": self.chat_id, "text": text, "reply_markup": reply_markup}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         try:
             resp = self._session.post(self._url("sendMessage"), json=payload, timeout=10)
             if resp.ok:
@@ -198,9 +200,11 @@ class TelegramClient:
             logger.warning("sendMessage(keyboard) exception: %s", e)
         return None
 
-    def edit_message_keyboard(self, message_id: int, text: str, reply_markup: dict) -> bool:
+    def edit_message_keyboard(self, message_id: int, text: str, reply_markup: dict, parse_mode: str = "") -> bool:
         """Edit an existing message's text and keyboard in-place."""
         payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         try:
             resp = self._session.post(self._url("editMessageText"), json=payload, timeout=10)
             if resp.ok:
