@@ -44,6 +44,10 @@ class Router:
         # Media messages (photo, video, document)
         if self.media_archive and any(k in message for k in ("photo", "video", "document")):
             logger.info("Incoming media from [%s]", sender_id)
+            caption = message.get("caption", "").strip()
+            if "photo" in message and caption and self.claude:
+                file_id = message["photo"][-1]["file_id"]
+                return self.claude.handle_with_image(caption, file_id)
             return self.media_archive.handle(message)
 
         text = (message.get("text") or "").strip()

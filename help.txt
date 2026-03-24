@@ -1,0 +1,24 @@
+<b>📖 使用说明</b>
+
+<b>对话</b>
+  直接发消息 → 发给 Claude 回答
+  <code>?问题</code> → 明确发给 Claude（同上）
+
+<b>Shell 命令</b>
+  <code>!命令</code> → 在服务器上执行 shell 命令（不允许 sudo）
+
+<b>管理命令</b>
+  <code>/help</code> — 显示此帮助
+  <code>/status</code> — 查看当前 Claude backend 状态
+  <code>/clear</code> 或 <code>!clear</code> — 清空 Claude 对话历史
+  <code>/setkey &lt;API_KEY&gt;</code> — 设置 Anthropic API key，切换到 api backend
+  <code>/setcli</code> — 切回 <code>claude -p</code> backend
+
+<b>媒体</b>
+  发送图片/视频/文件 → 自动存档到服务器
+  发送图片 + caption → Claude 识图（仅 api backend）
+  让 Claude 发图片或视频 → Claude 会直接发送
+
+<b>其他</b>
+  对消息添加表情反应 → Bot 回复同样的 emoji
+  Claude 可渲染 LaTeX 公式（在回复中要求即可）

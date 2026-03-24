@@ -10,9 +10,9 @@
   "poll_interval": 2,
   "shell_timeout": 30,
   "shell_output_max_chars": 3000,
-  "claude_backend": "cli",
+  "claude_backend": "api",
   "claude_model": "claude-sonnet-4-6",
-  "claude_max_tokens": 1024,
+  "claude_max_tokens": 4096,
   "claude_history_turns": 6,
   "claude_cli_timeout": 120,
   "claude_allowed_commands": []

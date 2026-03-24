@@ -58,6 +58,7 @@ handlers.py         — ShellHandler, ClaudeHandler (cli/api), PresetHandler,
 notify_server.py    — localhost:8765 HTTP server for outbound notifications
 send.py             — CLI helper to POST to notify server (stdlib only)
 config.json         — presets, timeouts, model/backend settings
+help.txt            — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt           — Telegram bot token (never commit)
 CHAT_ID.txt         — authorized chat ID (never commit)
 telegram_bot.service — systemd unit
@@ -73,7 +74,8 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 
 | Input | Handler |
 |---|---|
-| Photo / video / document message | MediaArchiveHandler — saves to `archive_dir` |
+| Photo + caption | ClaudeHandler — image recognition (api backend only) |
+| Photo / video / document (no caption) | MediaArchiveHandler — saves to `archive_dir` |
 | Emoji reaction on a message | Replies with the same emoji(s) |
 | `!clear` or `/clear` | Clears Claude conversation history |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |

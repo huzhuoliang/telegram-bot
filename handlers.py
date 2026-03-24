@@ -92,16 +92,15 @@ def _convert_md_tables(text: str) -> str:
             i += 1
     return '\n'.join(result)
 
-def _render_latex(source: str) -> tuple[str | None, str | None]:
-    """Compile LaTeX source with xelatex, convert first page to PNG.
-    Returns (png_path, None) on success, (None, error_message) on failure.
-    Caller is responsible for deleting the png file."""
-    import tempfile, shutil
+def _render_latex(source: str) -> tuple[list[str], str | None]:
+    """Compile LaTeX source with xelatex, convert all pages to PNG.
+    Returns ([png_paths], None) on success, ([], error_message) on failure.
+    Caller is responsible for deleting the png files."""
+    import tempfile, shutil, glob as _glob
     tmpdir = tempfile.mkdtemp(prefix="tgbot_latex_")
     try:
         tex_path = os.path.join(tmpdir, "doc.tex")
         pdf_path = os.path.join(tmpdir, "doc.pdf")
-        png_path = os.path.join(tmpdir, "doc.png")
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(source)
         # Compile
@@ -111,26 +110,29 @@ def _render_latex(source: str) -> tuple[str | None, str | None]:
         )
         if not os.path.exists(pdf_path):
             log_snippet = (result.stdout + result.stderr)[-800:]
-            return None, f"LaTeX 编译失败：\n<pre>{log_snippet}</pre>"
-        # Convert first page to PNG (300 dpi)
+            return [], f"LaTeX 编译失败：\n<pre>{log_snippet}</pre>"
+        # Convert all pages to PNG (200 dpi); pdftoppm names them doc-1.png, doc-2.png, ...
         result2 = subprocess.run(
-            ["pdftoppm", "-png", "-r", "200", "-singlefile", pdf_path,
-             os.path.join(tmpdir, "doc")],
-            capture_output=True, text=True, timeout=30,
+            ["pdftoppm", "-png", "-r", "200", pdf_path, os.path.join(tmpdir, "doc")],
+            capture_output=True, text=True, timeout=60,
         )
-        if not os.path.exists(png_path):
-            return None, f"PDF 转图片失败：{result2.stderr[:300]}"
-        # Move PNG out of tmpdir before cleanup
+        pages = sorted(_glob.glob(os.path.join(tmpdir, "doc-*.png")))
+        if not pages:
+            return [], f"PDF 转图片失败：{result2.stderr[:300]}"
+        # Move PNGs out of tmpdir before cleanup
         import shutil as _shutil
-        out_png = tempfile.mktemp(suffix=".png", prefix="tgbot_latex_")
-        _shutil.move(png_path, out_png)
-        return out_png, None
+        out_pages = []
+        for p in pages:
+            out = tempfile.mktemp(suffix=".png", prefix="tgbot_latex_")
+            _shutil.move(p, out)
+            out_pages.append(out)
+        return out_pages, None
     except subprocess.TimeoutExpired:
-        return None, "LaTeX 编译超时（>60 秒）"
+        return [], "LaTeX 编译超时（>60 秒）"
     except FileNotFoundError as e:
-        return None, f"缺少依赖：{e}（请确认已安装 xelatex 和 poppler-utils）"
+        return [], f"缺少依赖：{e}（请确认已安装 xelatex 和 poppler-utils）"
     except Exception as e:
-        return None, f"渲染错误：{e}"
+        return [], f"渲染错误：{e}"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -163,8 +165,21 @@ RULES:
 3. Escape HTML special characters in user-supplied content if you echo it back: & → &amp;  < → &lt;  > → &gt;
 """
 
-def _build_system_prompt(allowed_commands: list[str]) -> str:
-    return _SYSTEM_PROMPT_BASE
+_SYSTEM_PROMPT_LATEX_API = """
+LATEX (api backend): You have a render_latex tool. When the user asks for a LaTeX document or math formula, call render_latex IMMEDIATELY — do NOT write any acknowledgment or explanation text first. Just call the tool directly. After the tool returns, you may add a brief comment. Do NOT output LaTeX source as plain text.
+"""
+
+_SYSTEM_PROMPT_LATEX_CLI = """
+LATEX (cli backend): To render a LaTeX document, embed the source in your response using this marker:
+  [LATEX:
+  <complete LaTeX source starting with \\documentclass>
+  ]
+Use this whenever the user asks to render math formulas or LaTeX documents. Do NOT output the source as plain text.
+"""
+
+def _build_system_prompt(allowed_commands: list[str], backend: str = "cli") -> str:
+    latex_section = _SYSTEM_PROMPT_LATEX_API if backend == "api" else _SYSTEM_PROMPT_LATEX_CLI
+    return _SYSTEM_PROMPT_BASE + latex_section
 
 
 class ShellHandler:
@@ -243,7 +258,7 @@ class ClaudeHandler:
         self.cli_timeout = cli_timeout
         self._telegram_client = telegram_client
         self._allowed_commands: list[str] = allowed_commands or []
-        self._system_prompt = _build_system_prompt(self._allowed_commands)
+        self._system_prompt = _build_system_prompt(self._allowed_commands, backend)
         self._history: list[dict] = []
         self._lock = threading.Lock()
         self._api_client = None  # lazy-init only if backend == "api"
@@ -266,23 +281,25 @@ class ClaudeHandler:
             if not source.lstrip().startswith('\\documentclass'):
                 source = (
                     "\\documentclass[12pt]{article}\n"
-                    "\\usepackage{amsmath,amssymb,geometry,fontenc}\n"
+                    "\\usepackage{amsmath,amssymb,geometry}\n"
+                    "\\usepackage{xeCJK}\n"
                     "\\geometry{margin=2cm}\n"
                     "\\begin{document}\n"
                     + source +
                     "\n\\end{document}"
                 )
             logger.info("Rendering LaTeX (%d chars)", len(source))
-            png_path, err = _render_latex(source)
+            png_pages, err = _render_latex(source)
             if err:
                 logger.warning("LaTeX render error: %s", err[:200])
                 self._telegram_client.send_message(f"⚠️ LaTeX 渲染失败：{err}", parse_mode="HTML")
             else:
-                self._telegram_client.send_photo(png_path)
-                try:
-                    os.unlink(png_path)
-                except OSError:
-                    pass
+                for p in png_pages:
+                    self._telegram_client.send_photo(p)
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
             return ""
 
         response = _LATEX_RE.sub(_run_latex, response)
@@ -296,9 +313,13 @@ class ClaudeHandler:
             caption = (match.group(3) or "").strip()
             logger.info("Action from Claude: %s %s", kind, target)
             if kind == "PHOTO":
-                self._telegram_client.send_photo(target, caption)
+                ok = self._telegram_client.send_photo(target, caption)
+                if not ok:
+                    self._telegram_client.send_message(f"⚠️ 图片发送失败：{target[:100]}")
             elif kind == "VIDEO":
-                self._telegram_client.send_video(target, caption)
+                ok = self._telegram_client.send_video(target, caption)
+                if not ok:
+                    self._telegram_client.send_message(f"⚠️ 视频发送失败：{target[:100]}")
             return ""  # remove marker from text reply
 
         cleaned = _ACTION_RE.sub(_run, response).strip()
@@ -330,7 +351,7 @@ class ClaudeHandler:
         # Do NOT inject the TOOLS section — Claude Code CLI has its own tool
         # execution system that would intercept [CMD:] markers and show
         # permission prompts instead of outputting the markers as text.
-        cli_prompt = _build_system_prompt([])  # no tools for cli backend
+        cli_prompt = _build_system_prompt([], "cli")  # no tools for cli backend
         prompt = f"{cli_prompt}\nUser: {text}"
         for _ in range(3):  # max 3 tool-call rounds
             result = subprocess.run(
@@ -351,11 +372,40 @@ class ClaudeHandler:
         """Build the Anthropic tools list based on configuration."""
         tools = [
             {
+                "name": "write_latex",
+                "description": (
+                    "Write (or append) text to a LaTeX source file on the server. "
+                    "Use this to build large LaTeX documents in multiple chunks that would "
+                    "exceed token limits if passed inline. Call with mode='write' first to "
+                    "create/overwrite the file, then mode='append' for each subsequent chunk. "
+                    "When done, call render_latex with the same path."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute file path, e.g. /tmp/tgbot_novel.tex",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The LaTeX text to write or append.",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["write", "append"],
+                            "description": "'write' creates/overwrites; 'append' adds to existing file.",
+                        },
+                    },
+                    "required": ["path", "content", "mode"],
+                },
+            },
+            {
                 "name": "render_latex",
                 "description": (
-                    "Compile a LaTeX document and send the rendered image to the user. "
-                    "Use this whenever the user asks for a formatted document, math formulas, "
-                    "paper-style layout, or any content that benefits from LaTeX typesetting."
+                    "Compile a LaTeX document and send the rendered image(s) to the user. "
+                    "For short documents, pass the full source in 'source'. "
+                    "For long documents, first build the file with write_latex, then pass the file path in 'path'."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -363,15 +413,17 @@ class ClaudeHandler:
                         "source": {
                             "type": "string",
                             "description": (
-                                "Complete LaTeX source (\\documentclass … \\end{document}). "
-                                "Use XeLaTeX-compatible packages. For Chinese text add \\usepackage{xeCJK}. "
-                                "For math use amsmath/amssymb. For icons use fontawesome5."
+                                "Inline LaTeX source (\\documentclass … \\end{document}). "
+                                "Use XeLaTeX packages. For Chinese add \\usepackage{xeCJK}."
                             ),
-                        }
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Path to an existing .tex file written via write_latex.",
+                        },
                     },
-                    "required": ["source"],
                 },
-            }
+            },
         ]
         if self._allowed_commands:
             tools.append({
@@ -395,22 +447,58 @@ class ClaudeHandler:
 
     def _handle_tool_call(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool call and return the result string."""
+        if tool_name == "write_latex":
+            path = tool_input.get("path", "").strip()
+            content = tool_input.get("content", "")
+            mode = tool_input.get("mode", "write")
+            if not path:
+                return "Error: path is required"
+            try:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w" if mode == "write" else "a", encoding="utf-8") as f:
+                    f.write(content)
+                size = os.path.getsize(path)
+                logger.info("write_latex %s %s (%d bytes total)", mode, path, size)
+                return f"OK: {size} bytes written to {path}"
+            except Exception as e:
+                return f"Error: {e}"
+
         if tool_name == "render_latex":
-            source = tool_input.get("source", "")
+            # Accept either inline source or a file path
+            path = tool_input.get("path", "").strip()
+            if path:
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        source = f.read()
+                except Exception as e:
+                    return f"Error reading {path}: {e}"
+            else:
+                source = tool_input.get("source", "")
+            if not source.lstrip().startswith('\\documentclass'):
+                source = (
+                    "\\documentclass[12pt]{article}\n"
+                    "\\usepackage{amsmath,amssymb,geometry}\n"
+                    "\\usepackage{xeCJK}\n"
+                    "\\geometry{margin=2cm}\n"
+                    "\\begin{document}\n"
+                    + source +
+                    "\n\\end{document}"
+                )
             logger.info("Tool: render_latex (%d chars)", len(source))
-            png_path, err = _render_latex(source)
+            png_pages, err = _render_latex(source)
             if err:
                 logger.warning("LaTeX render error: %s", err[:200])
                 if self._telegram_client:
                     self._telegram_client.send_message(f"⚠️ LaTeX 渲染失败：{err}", parse_mode="HTML")
                 return f"Error: {err}"
             if self._telegram_client:
-                self._telegram_client.send_photo(png_path)
-            try:
-                os.unlink(png_path)
-            except OSError:
-                pass
-            return "Image sent successfully."
+                for p in png_pages:
+                    self._telegram_client.send_photo(p)
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+            return f"{len(png_pages)} page(s) sent successfully."
 
         if tool_name == "run_command":
             cmd = tool_input.get("command", "")
@@ -422,59 +510,126 @@ class ClaudeHandler:
 
         return f"Error: unknown tool '{tool_name}'"
 
-    def _call_api(self, text: str) -> str:
-        # history is already locked by caller
-        self._history.append({"role": "user", "content": text})
-        max_msgs = self.history_turns * 2
-        if len(self._history) > max_msgs:
-            self._history = self._history[-max_msgs:]
-        client = self._get_api_client()
-        tools = self._build_tools()
-
-        for _ in range(5):  # max 5 tool-call rounds
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=self._system_prompt,
-                messages=self._history,
-                tools=tools,
+    @staticmethod
+    def _is_text_user_message(msg: dict) -> bool:
+        """Return True if msg is a user message with text (not tool_results)."""
+        if msg.get("role") != "user":
+            return False
+        content = msg.get("content")
+        if isinstance(content, str):
+            return True
+        if isinstance(content, list):
+            return any(
+                isinstance(b, dict) and b.get("type") != "tool_result"
+                for b in content
             )
+        return True
 
-            # Collect text and tool_use blocks
-            text_parts = []
-            tool_calls = []
-            for block in response.content:
-                if block.type == "text":
-                    text_parts.append(block.text)
-                elif block.type == "tool_use":
-                    tool_calls.append(block)
+    @staticmethod
+    def _block_has_tool_use(content) -> bool:
+        if not isinstance(content, list):
+            return False
+        for b in content:
+            btype = b.get("type") if isinstance(b, dict) else getattr(b, "type", None)
+            if btype == "tool_use":
+                return True
+        return False
 
-            if response.stop_reason != "tool_use" or not tool_calls:
-                # Final text response
-                raw = "\n".join(text_parts).strip()
-                cleaned = self._execute_actions(_convert_md_tables(raw))
+    def _sanitize_history(self):
+        """Remove any trailing assistant(tool_use) without a following tool_result.
+        This can happen if a previous call crashed mid-round."""
+        while (
+            len(self._history) >= 1
+            and self._history[-1].get("role") == "assistant"
+            and self._block_has_tool_use(self._history[-1].get("content", []))
+        ):
+            logger.warning("Removing orphaned tool_use from history tail")
+            self._history.pop()
+
+    def _call_api(self, text: str, image_data: bytes = None) -> str:
+        # history is already locked by caller.
+        # Save state so we can roll back on any error.
+        import base64 as _b64
+        self._sanitize_history()
+        saved_history = list(self._history)
+        try:
+            if image_data:
+                content = [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": _b64.b64encode(image_data).decode(),
+                        },
+                    },
+                    {"type": "text", "text": text},
+                ]
+            else:
+                content = text
+            self._history.append({"role": "user", "content": content})
+            max_msgs = self.history_turns * 2
+            if len(self._history) > max_msgs:
+                trimmed = self._history[-max_msgs:]
+                # Advance past any leading tool_result / assistant messages so
+                # we never send an orphaned tool_use block to the API.
+                start = 0
+                while start < len(trimmed) and not self._is_text_user_message(trimmed[start]):
+                    start += 1
+                self._history = trimmed[start:]
+
+            client = self._get_api_client()
+            tools = self._build_tools()
+
+            for _ in range(5):  # max 5 tool-call rounds
+                response = client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=self._system_prompt,
+                    messages=self._history,
+                    tools=tools,
+                )
+
+                # Collect text and tool_use blocks
+                text_parts = []
+                tool_calls = []
+                for block in response.content:
+                    if block.type == "text":
+                        text_parts.append(block.text)
+                    elif block.type == "tool_use":
+                        tool_calls.append(block)
+
+                if response.stop_reason != "tool_use" or not tool_calls:
+                    # Final text response
+                    raw = "\n".join(text_parts).strip()
+                    logger.info("Claude raw response (stop=%s): %s", response.stop_reason, raw[:500])
+                    cleaned = self._execute_actions(_convert_md_tables(raw))
+                    self._history.append({"role": "assistant", "content": response.content})
+                    return cleaned or "已完成。"
+
+                # Execute tool calls and feed results back
                 self._history.append({"role": "assistant", "content": response.content})
-                return cleaned or "已完成。"
+                tool_results = []
+                for tc in tool_calls:
+                    result = self._handle_tool_call(tc.name, tc.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": result,
+                    })
+                self._history.append({"role": "user", "content": tool_results})
 
-            # Execute tool calls and feed results back
-            self._history.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for tc in tool_calls:
-                result = self._handle_tool_call(tc.name, tc.input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "content": result,
-                })
-            self._history.append({"role": "user", "content": tool_results})
+            # Exhausted rounds — response.content (tool_use) was already appended
+            # inside the loop; do NOT append again to avoid orphaned tool_use blocks.
+            raw = "\n".join(
+                block.text for block in response.content if block.type == "text"
+            ).strip()
+            cleaned = self._execute_actions(_convert_md_tables(raw))
+            return cleaned or "已完成。"
 
-        # Exhausted rounds — return whatever text we have
-        raw = "\n".join(
-            block.text for block in response.content if block.type == "text"
-        ).strip()
-        cleaned = self._execute_actions(_convert_md_tables(raw))
-        self._history.append({"role": "assistant", "content": response.content})
-        return cleaned or "已完成。"
+        except Exception:
+            self._history = saved_history  # roll back all history changes
+            raise
 
     def handle(self, text: str) -> str:
         if not text:
@@ -494,9 +649,44 @@ class ClaudeHandler:
             except FileNotFoundError:
                 reply = "错误：PATH 中未找到 claude 命令"
             except Exception as e:
-                if self.backend == "api" and self._history and self._history[-1]["role"] == "user":
-                    self._history.pop()  # roll back poisoned history entry
+                # _call_api rolls back history on error; nothing to do here.
                 logger.warning("Claude error: %s", e)
+                reply = f"Claude 错误：{e}"
+        if processing_msg_id and self._telegram_client:
+            self._telegram_client.delete_message(processing_msg_id)
+        if self._telegram_client:
+            self._telegram_client.send_message(reply, parse_mode="HTML")
+            return None
+        return reply
+
+    def handle_with_image(self, text: str, file_id: str) -> str:
+        """Download a Telegram photo and send it to Claude for recognition (api backend only)."""
+        if self.backend != "api":
+            return "⚠️ 识图仅支持 api backend。"
+        import tempfile
+        logger.info("Claude image [%s]: %s", self.backend, text[:80])
+        processing_msg_id = None
+        if self._telegram_client:
+            processing_msg_id = self._telegram_client.send_message("⏳ 处理中...")
+        tmp_path = None
+        image_data = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp_path = tmp.name
+            ok = self._telegram_client.download_file(file_id, tmp_path)
+            if ok:
+                with open(tmp_path, "rb") as f:
+                    image_data = f.read()
+        except Exception as e:
+            logger.warning("Image download failed: %s", e)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        with self._lock:
+            try:
+                reply = self._call_api(text, image_data=image_data)
+            except Exception as e:
+                logger.warning("Claude image error: %s", e)
                 reply = f"Claude 错误：{e}"
         if processing_msg_id and self._telegram_client:
             self._telegram_client.delete_message(processing_msg_id)
@@ -509,24 +699,9 @@ class ClaudeHandler:
         with self._lock:
             backend = self.backend
             allowed = list(self._allowed_commands)
-        lines = [
-            "<b>📖 使用说明</b>\n",
-            "<b>对话</b>",
-            "  直接发消息 → 发给 Claude 回答",
-            "  <code>?问题</code> → 明确发给 Claude（同上）\n",
-            "<b>Shell 命令</b>",
-            "  <code>!命令</code> → 在服务器上执行 shell 命令（不允许 sudo）\n",
-            "<b>管理命令</b>",
-            "  <code>/help</code> — 显示此帮助",
-            "  <code>/status</code> — 查看当前 Claude backend 状态",
-            "  <code>/clear</code> 或 <code>!clear</code> — 清空 Claude 对话历史",
-            "  <code>/setkey &lt;API_KEY&gt;</code> — 设置 Anthropic API key，切换到 api backend",
-            "  <code>/setcli</code> — 切回 <code>claude -p</code> backend\n",
-            "<b>媒体</b>",
-            "  发送图片/视频/文件 → 自动存档到服务器",
-            "  让 Claude 发图片或视频 → Claude 会直接发送\n",
-            f"<b>当前 Backend：</b><code>{backend}</code>",
-        ]
+        help_file = Path(__file__).parent / "help.txt"
+        static = help_file.read_text(encoding="utf-8").rstrip()
+        lines = [static, f"\n<b>当前 Backend：</b><code>{backend}</code>"]
         if backend == "api":
             lines.append("  ✅ 支持多轮对话历史")
             if allowed:
@@ -590,6 +765,7 @@ class ClaudeHandler:
         # Switch backend and reset client + history
         with self._lock:
             self.backend = "api"
+            self._system_prompt = _build_system_prompt(self._allowed_commands, "api")
             self._api_client = None
             self._history.clear()
 
@@ -622,6 +798,7 @@ class ClaudeHandler:
         """Switch back to cli backend and persist the change."""
         with self._lock:
             self.backend = "cli"
+            self._system_prompt = _build_system_prompt(self._allowed_commands, "cli")
             self._history.clear()
 
         # Remove api_key.txt so it doesn't auto-load on restart
