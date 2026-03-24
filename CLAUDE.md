@@ -53,8 +53,8 @@ bot.py              — entry point: threads, signal handling, startup/shutdown
 telegram_client.py  — Telegram Bot API wrapper (long-poll, send/delete message,
                       send photo/video with URL→download fallback, download file)
 router.py           — chat_id auth gate + message type dispatch
-handlers.py         — ShellHandler, ClaudeHandler (cli/api), PresetHandler,
-                      MediaArchiveHandler
+handlers.py         — ShellHandler, ClaudeHandler (cli/api), PrivilegedClaudeHandler,
+                      PresetHandler, MediaArchiveHandler
 notify_server.py    — localhost:8765 HTTP server for outbound notifications
 send.py             — CLI helper to POST to notify server (stdlib only)
 config.json         — presets, timeouts, model/backend settings
@@ -78,7 +78,9 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | Photo / video / document (no caption) | MediaArchiveHandler — saves to `archive_dir` |
 | Emoji reaction on a message | Replies with the same emoji(s) |
 | `!clear` or `/clear` | Clears Claude conversation history |
+| `$clear` | Clears privileged Claude conversation history |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
+| `$<text>` | PrivilegedClaudeHandler — unrestricted shell/file access (api backend only) |
 | `?<text>` | ClaudeHandler |
 | Preset keyword | PresetHandler — dict lookup from config.json |
 | Anything else | ClaudeHandler (default fallback) |
@@ -135,5 +137,9 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `claude_max_tokens` | `1024` | Max tokens (used by `api` backend only) |
 | `claude_history_turns` | `6` | Rolling history window (used by `api` backend only) |
 | `claude_cli_timeout` | `120` | Subprocess timeout for `cli` backend |
+| `privileged_claude_model` | `"claude-sonnet-4-6"` | Model for `$` privileged handler |
+| `privileged_claude_max_tokens` | `4096` | Max tokens for privileged handler |
+| `privileged_claude_history_turns` | `6` | Rolling history window for privileged handler |
+| `privileged_claude_shell_timeout` | `60` | Shell command timeout for privileged handler |
 | `log_file` | (none) | Optional log file path; stdout only if omitted |
 | `log_level` | `"INFO"` | Logging level |

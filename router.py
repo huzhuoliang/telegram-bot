@@ -7,16 +7,29 @@ logger = logging.getLogger(__name__)
 
 class Router:
     def __init__(self, chat_id: str, shell_handler, claude_handler, preset_handler,
-                 media_archive_handler=None, config_path: str = None):
+                 media_archive_handler=None, file_archive_handler=None,
+                 privileged_claude_handler=None, config_path: str = None):
         self.chat_id = str(chat_id).strip()
         self.shell = shell_handler
         self.claude = claude_handler
         self.preset = preset_handler
         self.media_archive = media_archive_handler
+        self.file_archive = file_archive_handler
+        self.privileged_claude = privileged_claude_handler
         self.config_path = config_path
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
+
+        # Callback query (inline keyboard button click)
+        callback_query = update.get("callback_query")
+        if callback_query:
+            chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+            if chat_id != self.chat_id:
+                return None
+            if self.file_archive:
+                self.file_archive.handle_callback(callback_query)
+            return None
 
         # Message reaction
         reaction = update.get("message_reaction")
@@ -60,6 +73,9 @@ class Router:
         if text.lower() in ("!clear", "/clear"):
             return self.claude.clear_history()
 
+        if text.lower() == "$clear" and self.privileged_claude:
+            return self.privileged_claude.clear_history()
+
         if text.lower().startswith("/setkey "):
             api_key = text[8:].strip()
             if not api_key:
@@ -75,9 +91,18 @@ class Router:
         if text.lower() == "/help":
             return self.claude.help()
 
+        if text.lower() == "/files":
+            if self.file_archive:
+                self.file_archive.handle_command()
+            return None
+
         # !cmd → shell
         if text.startswith("!"):
             return self.shell.handle(text[1:].strip())
+
+        # $cmd → privileged Claude
+        if text.startswith("$") and self.privileged_claude:
+            return self.privileged_claude.handle(text[1:].strip())
 
         # ?question → Claude
         if text.startswith("?"):

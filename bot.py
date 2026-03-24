@@ -21,7 +21,7 @@ import sys
 import threading
 from pathlib import Path
 
-from handlers import ClaudeHandler, MediaArchiveHandler, PresetHandler, ShellHandler
+from handlers import ClaudeHandler, FileArchiveHandler, MediaArchiveHandler, PresetHandler, PrivilegedClaudeHandler, ShellHandler
 from notify_server import run_notify_server
 from router import Router
 from telegram_client import TelegramClient
@@ -124,13 +124,26 @@ def main():
         telegram_client=client,
         allowed_commands=config.get("claude_allowed_commands", []),
     )
+    privileged_claude_handler = PrivilegedClaudeHandler(
+        model=config.get("privileged_claude_model", config.get("claude_model", "claude-sonnet-4-6")),
+        max_tokens=config.get("privileged_claude_max_tokens", 4096),
+        history_turns=config.get("privileged_claude_history_turns", 6),
+        shell_timeout=config.get("privileged_claude_shell_timeout", 60),
+        telegram_client=client,
+    )
     preset_handler = PresetHandler(config.get("presets", {}))
     media_archive_handler = MediaArchiveHandler(
         archive_dir=config.get("archive_dir", "~/telegram_archive"),
         telegram_client=client,
     )
+    file_archive_handler = FileArchiveHandler(
+        archive_dir=config.get("archive_dir", "~/telegram_archive"),
+        telegram_client=client,
+    )
     router = Router(chat_id, shell_handler, claude_handler, preset_handler,
                     media_archive_handler=media_archive_handler,
+                    file_archive_handler=file_archive_handler,
+                    privileged_claude_handler=privileged_claude_handler,
                     config_path=args.config)
 
     signal.signal(signal.SIGTERM, handle_signal)

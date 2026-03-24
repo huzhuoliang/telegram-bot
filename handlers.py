@@ -42,6 +42,23 @@ def _run_cmd(cmd: str) -> str:
         return f"(执行错误: {e})"
 
 
+def _run_privileged_cmd(cmd: str, timeout: int = 60) -> str:
+    """Execute any shell command (including sudo) without restrictions."""
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=timeout, cwd=str(Path.home()),
+        )
+        output = (result.stdout + result.stderr).strip()
+        if len(output) > 4000:
+            output = output[:4000] + "\n…(truncated)"
+        return f"exit {result.returncode}\n{output}" if output else f"exit {result.returncode} (no output)"
+    except subprocess.TimeoutExpired:
+        return f"(timeout after {timeout}s)"
+    except Exception as e:
+        return f"(error: {e})"
+
+
 def _cmd_executable(cmd: str) -> str:
     """Return the executable name (first token) of a command string."""
     import shlex
@@ -823,36 +840,315 @@ class PresetHandler:
 class MediaArchiveHandler:
     """Saves incoming photos and videos forwarded to the bot."""
 
+    _index_lock = threading.Lock()
+
     def __init__(self, archive_dir: str, telegram_client):
         self.archive_dir = Path(archive_dir).expanduser()
         self._client = telegram_client
 
+    def _append_index(self, file_id: str, media_type: str, rel_path: str, ts: str):
+        index_path = self.archive_dir / "archive_index.json"
+        tmp_path = self.archive_dir / "archive_index.json.tmp"
+        with MediaArchiveHandler._index_lock:
+            try:
+                entries = json.loads(index_path.read_text()).get("entries", []) if index_path.exists() else []
+            except Exception:
+                entries = []
+            entries.append({"type": media_type, "file_id": file_id, "rel_path": rel_path, "ts": ts})
+            tmp_path.write_text(json.dumps({"entries": entries}))
+            os.replace(tmp_path, index_path)
+
     def handle(self, message: dict) -> str:
         import datetime
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        ts_readable = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if "photo" in message:
             # Telegram sends multiple sizes; pick the largest (last in array)
             file_id = message["photo"][-1]["file_id"]
             save_path = str(self.archive_dir / "photos" / f"{ts}.jpg")
             kind = "图片"
+            kind_key = "photo"
         elif "video" in message:
             file_id = message["video"]["file_id"]
             ext = message["video"].get("mime_type", "video/mp4").split("/")[-1]
             save_path = str(self.archive_dir / "videos" / f"{ts}.{ext}")
             kind = "视频"
+            kind_key = "video"
         elif "document" in message:
             doc = message["document"]
             file_id = doc["file_id"]
             filename = doc.get("file_name", f"{ts}.bin")
             save_path = str(self.archive_dir / "documents" / filename)
             kind = "文件"
+            kind_key = "document"
         else:
             return "不支持的媒体类型。"
 
         logger.info("Archiving %s → %s", kind, save_path)
         ok = self._client.download_file(file_id, save_path)
         if ok:
+            rel = str(Path(save_path).relative_to(self.archive_dir))
+            self._append_index(file_id, kind_key, rel, ts_readable)
             return f"✅ {kind}已存档：{save_path}"
         else:
             return f"❌ {kind}存档失败，请查看日志。"
+
+
+class FileArchiveHandler:
+    """Browse, preview and download archived media files via inline keyboard."""
+
+    PAGE_SIZE = 8
+    TYPE_LABELS = {"photo": "📷 照片", "video": "📹 视频", "document": "📄 文档"}
+
+    def __init__(self, archive_dir: str, telegram_client):
+        self.archive_dir = Path(archive_dir).expanduser()
+        self._client = telegram_client
+
+    def _load_index(self) -> list:
+        path = self.archive_dir / "archive_index.json"
+        if not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text()).get("entries", [])
+        except Exception:
+            return []
+
+    def _main_menu_markup(self, entries: list) -> dict:
+        counts = {t: sum(1 for e in entries if e["type"] == t) for t in ("photo", "video", "document")}
+        buttons = [
+            {"text": f"📷 照片 ({counts['photo']})", "callback_data": "files:photo:0"},
+            {"text": f"📹 视频 ({counts['video']})", "callback_data": "files:video:0"},
+            {"text": f"📄 文档 ({counts['document']})", "callback_data": "files:document:0"},
+        ]
+        return {"inline_keyboard": [buttons]}
+
+    def handle_command(self):
+        """Handle /files command — sends the main menu."""
+        entries = self._load_index()
+        markup = self._main_menu_markup(entries)
+        self._client.send_message_with_keyboard("📁 归档文件", markup)
+
+    def handle_callback(self, callback_query: dict):
+        """Handle all files:* and file:* callback queries."""
+        cq_id = callback_query["id"]
+        data = callback_query.get("data", "")
+        message_id = callback_query.get("message", {}).get("message_id")
+
+        # Answer immediately to dismiss the loading spinner
+        self._client.answer_callback_query(cq_id)
+
+        parts = data.split(":", 2)
+        if not parts:
+            return
+
+        if parts[0] == "files":
+            if len(parts) == 2 and parts[1] == "menu":
+                entries = self._load_index()
+                markup = self._main_menu_markup(entries)
+                self._client.edit_message_keyboard(message_id, "📁 归档文件", markup)
+            elif len(parts) == 3:
+                media_type = parts[1]
+                try:
+                    page = int(parts[2])
+                except ValueError:
+                    return
+                self._show_page(message_id, media_type, page)
+
+        elif parts[0] == "file" and len(parts) == 3:
+            media_type = parts[1]
+            try:
+                idx = int(parts[2])
+            except ValueError:
+                return
+            entries = self._load_index()
+            if 0 <= idx < len(entries) and entries[idx]["type"] == media_type:
+                entry = entries[idx]
+                ok = self._client.send_by_file_id(media_type, entry["file_id"])
+                if not ok:
+                    abs_path = str(self.archive_dir / entry["rel_path"])
+                    if media_type == "photo":
+                        self._client.send_photo(abs_path)
+                    elif media_type == "video":
+                        self._client.send_video(abs_path)
+
+    def _show_page(self, message_id: int, media_type: str, page: int):
+        entries = self._load_index()
+        typed = [(i, e) for i, e in enumerate(entries) if e["type"] == media_type]
+        typed.reverse()  # newest first
+        total = len(typed)
+        label = self.TYPE_LABELS.get(media_type, media_type)
+
+        if total == 0:
+            markup = {"inline_keyboard": [[{"text": "🔙 返回", "callback_data": "files:menu"}]]}
+            self._client.edit_message_keyboard(message_id, f"{label}\n暂无文件", markup)
+            return
+
+        total_pages = (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * self.PAGE_SIZE
+        chunk = typed[start:start + self.PAGE_SIZE]
+
+        rows = []
+        for orig_idx, entry in chunk:
+            rows.append([{"text": entry["ts"], "callback_data": f"file:{media_type}:{orig_idx}"}])
+
+        nav = []
+        if page > 0:
+            nav.append({"text": "◀ 上一页", "callback_data": f"files:{media_type}:{page - 1}"})
+        if page < total_pages - 1:
+            nav.append({"text": "下一页 ▶", "callback_data": f"files:{media_type}:{page + 1}"})
+        nav.append({"text": "🔙 返回", "callback_data": "files:menu"})
+        rows.append(nav)
+
+        text = f"{label} ({total})  第 {page + 1}/{total_pages} 页"
+        markup = {"inline_keyboard": rows}
+        self._client.edit_message_keyboard(message_id, text, markup)
+
+
+# ---------------------------------------------------------------------------
+# Privileged Claude handler
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT_PRIVILEGED = """You are a privileged system administration AI running as a Telegram bot on the user's personal Linux server. The user has full administrative trust.
+
+LANGUAGE: Always respond in Chinese (中文), unless the content is code, shell output, file paths, or technical strings.
+
+FORMATTING: Responses are sent via Telegram with parse_mode=HTML. Use HTML tags:
+- <b>bold</b> for section headings and important notes
+- <code>inline code</code> for commands, file paths, variable names
+- <pre>block</pre> for shell output, file contents, multi-line code
+- Do NOT use Markdown syntax (no ** __ ` ``` etc.)
+- Keep responses concise — show what was done, then summarize.
+
+TOOLS AVAILABLE:
+- run_shell_command: Run any shell command, including sudo. You have full system access.
+- read_file: Read any file by absolute path.
+- write_file: Write or overwrite any file by absolute path.
+
+OPERATING PRINCIPLES:
+1. Execute tasks directly — do NOT ask "are you sure?" for routine operations.
+2. For destructive operations (rm -rf, overwriting critical configs), briefly state what you are about to do before calling the tool, then proceed.
+3. Always show the shell output or relevant file content so the user can verify.
+4. If a command needs sudo and fails due to permissions, clearly say so and suggest the sudoers fix.
+5. Every response must include at least one sentence of plain Chinese text.
+6. Escape HTML in user-supplied content echoed back: & → &amp;  < → &lt;  > → &gt;
+"""
+
+
+class PrivilegedClaudeHandler(ClaudeHandler):
+    """Unrestricted Claude AI with full shell, file-read, and file-write access.
+
+    Triggered by the '#' prefix in router.py. Always uses the 'api' backend.
+    Maintains a separate conversation history from the regular ClaudeHandler.
+    """
+
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-6",
+        max_tokens: int = 4096,
+        history_turns: int = 6,
+        shell_timeout: int = 60,
+        telegram_client=None,
+    ):
+        super().__init__(
+            backend="api",
+            model=model,
+            max_tokens=max_tokens,
+            history_turns=history_turns,
+            cli_timeout=120,
+            telegram_client=telegram_client,
+            allowed_commands=[],
+        )
+        self._shell_timeout = shell_timeout
+        self._system_prompt = _SYSTEM_PROMPT_PRIVILEGED
+
+    def _build_tools(self) -> list[dict]:
+        return [
+            {
+                "name": "run_shell_command",
+                "description": (
+                    "Run any shell command on the server, including sudo commands. "
+                    "Returns exit code + combined stdout/stderr."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The shell command to execute."}
+                    },
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "read_file",
+                "description": "Read the full contents of any file by absolute path.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute file path to read."}
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "write_file",
+                "description": (
+                    "Write (overwrite) a file at the given absolute path with new content. "
+                    "Creates parent directories if needed."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute file path to write."},
+                        "content": {"type": "string", "description": "Full new content of the file."},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        ]
+
+    def _handle_tool_call(self, tool_name: str, tool_input: dict) -> str:
+        if tool_name == "run_shell_command":
+            cmd = tool_input.get("command", "").strip()
+            if not cmd:
+                return "Error: command is empty"
+            logger.info("Privileged CMD: %s", cmd)
+            return _run_privileged_cmd(cmd, timeout=self._shell_timeout)
+
+        if tool_name == "read_file":
+            path = tool_input.get("path", "").strip()
+            logger.info("Privileged read_file: %s", path)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                if len(content) > 8000:
+                    content = content[:8000] + "\n…(truncated at 8000 chars)"
+                return content
+            except Exception as e:
+                return f"Error reading {path}: {e}"
+
+        if tool_name == "write_file":
+            path = tool_input.get("path", "").strip()
+            content = tool_input.get("content", "")
+            logger.info("Privileged write_file: %s (%d chars)", path, len(content))
+            try:
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return f"OK: wrote {os.path.getsize(path)} bytes to {path}"
+            except Exception as e:
+                return f"Error writing {path}: {e}"
+
+        return super()._handle_tool_call(tool_name, tool_input)
+
+    def handle(self, text: str) -> str:
+        if not text:
+            return self._send_html("用法：<code>$&lt;指令&gt;</code>")
+        return super().handle(text)
+
+    def clear_history(self) -> str:
+        with self._lock:
+            self._history.clear()
+        return self._send_html("特权对话历史已清除。")

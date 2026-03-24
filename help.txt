@@ -7,6 +7,10 @@
 <b>Shell 命令</b>
   <code>!命令</code> → 在服务器上执行 shell 命令（不允许 sudo）
 
+<b>特权 AI</b>
+  <code>$指令</code> → 特权 Claude，可执行任意命令（含 sudo）、读写任意文件
+  <code>$clear</code> → 清空特权 AI 对话历史
+
 <b>管理命令</b>
   <code>/help</code> — 显示此帮助
   <code>/status</code> — 查看当前 Claude backend 状态
