@@ -88,6 +88,9 @@ class Router:
         if text.lower() == "/status":
             return self.claude.status()
 
+        if text.lower() == "/ctx":
+            return self.claude.context_stats()
+
         if text.lower() == "/help":
             return self.claude.help()
 
@@ -102,6 +105,8 @@ class Router:
 
         # $cmd → privileged Claude
         if text.startswith("$") and self.privileged_claude:
+            if text.lower() == "$ctx":
+                return self.privileged_claude.context_stats()
             return self.privileged_claude.handle(text[1:].strip())
 
         # ?question → Claude

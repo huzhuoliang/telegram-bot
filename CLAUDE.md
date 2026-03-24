@@ -79,6 +79,8 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | Emoji reaction on a message | Replies with the same emoji(s) |
 | `!clear` or `/clear` | Clears Claude conversation history |
 | `$clear` | Clears privileged Claude conversation history |
+| `/ctx` | ClaudeHandler.context_stats() — context window breakdown (api only) |
+| `$ctx` | PrivilegedClaudeHandler.context_stats() — privileged context breakdown (api only) |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `$<text>` | PrivilegedClaudeHandler — unrestricted shell/file access (api backend only) |
 | `?<text>` | ClaudeHandler |

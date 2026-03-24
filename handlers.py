@@ -833,6 +833,60 @@ class ClaudeHandler:
             )
         return self._send_html(text)
 
+    def context_stats(self) -> str:
+        """Return a breakdown of context window usage (api backend only)."""
+        if self.backend != "api":
+            return self._send_html("⚠️ /ctx 仅支持 api backend。")
+        with self._lock:
+            history_snapshot = list(self._history)
+            system_prompt = self._system_prompt
+        try:
+            client = self._get_api_client()
+            tools = self._build_tools()
+            dummy = [{"role": "user", "content": "x"}]
+            CTX = self._CTX_WINDOW
+
+            r_base   = client.messages.count_tokens(model=self.model, messages=dummy)
+            r_system = client.messages.count_tokens(model=self.model, system=system_prompt, messages=dummy)
+            r_tools  = client.messages.count_tokens(model=self.model, messages=dummy, tools=tools)
+            r_full   = client.messages.count_tokens(
+                model=self.model, system=system_prompt,
+                messages=history_snapshot if history_snapshot else dummy,
+                tools=tools,
+            )
+
+            base_n    = r_base.input_tokens
+            system_n  = r_system.input_tokens - base_n
+            tools_n   = r_tools.input_tokens  - base_n
+            total_n   = r_full.input_tokens
+            history_n = total_n - system_n - tools_n - base_n
+            free_n    = CTX - total_n
+
+            def pct(n): return n / CTX * 100
+
+            bar_filled = int(total_n / CTX * 20)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
+
+            def row(label, n, extra=""):
+                # label: 4 CJK chars (8 display cols), number right-aligned 7 chars, pct 5 chars
+                return f"{label}  {n:>7,}  {pct(n):>4.1f}%  {extra}".rstrip()
+
+            table = "\n".join([
+                f"[{bar}]",
+                f"{total_n:,} / {CTX:,} ({pct(total_n):.1f}%)",
+                "",
+                row("系统提示", system_n),
+                row("工具定义", tools_n),
+                row("对话历史", history_n, f"{len(history_snapshot)//2}轮"),
+                row("基础开销", base_n),
+                "─" * 32,
+                row("剩余空间", free_n),
+            ])
+            header = f"上下文用量 · {self.model}"
+            return self._send_html(f"<b>{header}</b>\n<pre>{table}</pre>")
+        except Exception as e:
+            return self._send_html(f"⚠️ 计算失败：{e}")
+
     def configure_cli_backend(self, config_path: str = None) -> str:
         """Switch back to cli backend and persist the change."""
         with self._lock:
