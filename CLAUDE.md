@@ -95,7 +95,7 @@ Special commands are checked before prefix dispatch to avoid `!clear` being trea
 Controlled by `claude_backend` in `config.json`:
 
 - `"cli"` (default) — runs `claude -p <text>` subprocess. Uses existing Claude Code credentials. No API key needed. Stateless (no history).
-- `"api"` — uses `anthropic` SDK directly. Requires `ANTHROPIC_API_KEY`. Maintains rolling conversation history (`claude_history_turns` turns). `anthropic` import is lazy (only loaded when this backend is active).
+- `"api"` — uses `anthropic` SDK directly. Requires `ANTHROPIC_API_KEY`. Maintains rolling conversation history (`claude_history_turns` turns). `anthropic` import is lazy (only loaded when this backend is active). `PrivilegedClaudeHandler` additionally compresses history after each turn: tool-call intermediates (assistant tool_use + user tool_result pairs) are stripped, keeping only the original user text and final assistant text. This prevents token exhaustion in long sessions with many tool calls.
 
 Both backends:
 - Send `⏳ 处理中...` before calling the backend; on completion edit that message in-place with the reply (`editMessageText`) rather than delete+send. Falls back to delete+send if the edit fails (e.g. HTML parse error).

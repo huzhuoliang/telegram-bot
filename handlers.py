@@ -281,6 +281,7 @@ class ClaudeHandler:
         self._api_client = None  # lazy-init only if backend == "api"
         self._session_input_tokens = 0
         self._session_output_tokens = 0
+        self._compress_interactions = False  # subclasses may enable
 
     def _get_api_client(self):
         if self._api_client is None:
@@ -565,6 +566,47 @@ class ClaudeHandler:
             logger.warning("Removing orphaned tool_use from history tail")
             self._history.pop()
 
+    def _compress_last_interaction(self):
+        """Collapse tool-call intermediates from the last completed interaction.
+        Replaces the chain of assistant(tool_use)/user(tool_result) messages with
+        a single assistant text message, saving context tokens across turns."""
+        if len(self._history) < 2:
+            return
+        last = self._history[-1]
+        if last.get("role") != "assistant":
+            return
+        # Extract plain text from the final assistant content block
+        content = last.get("content", "")
+        if isinstance(content, str):
+            final_text = content
+        elif isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict):
+                    if b.get("type") == "text":
+                        parts.append(b.get("text", ""))
+                else:
+                    if getattr(b, "type", None) == "text":
+                        parts.append(getattr(b, "text", ""))
+            final_text = "\n".join(parts).strip()
+        else:
+            return
+        if not final_text:
+            return
+        # Walk back to find the originating user text message
+        i = len(self._history) - 2
+        while i >= 0 and not self._is_text_user_message(self._history[i]):
+            i -= 1
+        if i < 0:
+            return
+        removed = len(self._history) - i - 2  # intermediate messages dropped
+        self._history[i:] = [
+            self._history[i],
+            {"role": "assistant", "content": final_text},
+        ]
+        if removed > 0:
+            logger.debug("Compressed history: removed %d intermediate tool-call messages", removed)
+
     _CTX_WINDOW = 200_000  # claude-sonnet-4-6 context window
 
     def _append_usage(self, text: str, input_tokens: int, output_tokens: int) -> str:
@@ -642,6 +684,8 @@ class ClaudeHandler:
                     self._history.append({"role": "assistant", "content": response.content})
                     self._session_input_tokens += last_input_tokens
                     self._session_output_tokens += total_output_tokens
+                    if self._compress_interactions:
+                        self._compress_last_interaction()
                     return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
                 # Execute tool calls and feed results back
@@ -664,6 +708,8 @@ class ClaudeHandler:
             cleaned = self._execute_actions(_convert_md_tables(raw))
             self._session_input_tokens += last_input_tokens
             self._session_output_tokens += total_output_tokens
+            if self._compress_interactions:
+                self._compress_last_interaction()
             return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
         except Exception:
@@ -1154,6 +1200,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         self._busy = False
         # Auto-approve flag: set for the duration of a $$ request (background thread only)
         self._auto_approve = False
+        self._compress_interactions = True  # strip tool-call intermediates after each turn
 
     # ------------------------------------------------------------------
     # Whitelist helpers
