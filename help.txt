@@ -37,3 +37,4 @@
 <b>其他</b>
   对消息添加表情反应 → Bot 回复同样的 emoji
   Claude 可渲染 LaTeX 公式（在回复中要求即可）
+  api backend 下 Claude 回复为流式输出（逐字刷新，▌ 为生成中光标）
