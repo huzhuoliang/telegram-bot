@@ -98,9 +98,7 @@ Controlled by `claude_backend` in `config.json`:
 - `"api"` — uses `anthropic` SDK directly. Requires `ANTHROPIC_API_KEY`. Maintains rolling conversation history (`claude_history_turns` turns). `anthropic` import is lazy (only loaded when this backend is active).
 
 Both backends:
-- Send `⏳ 处理中...` before calling the backend
-- `api` backend: streams the response by editing the placeholder message in-place every 0.5 s (typewriter effect); cursor `▌` shown while generating. On completion the message is edited to the final HTML-formatted reply. When tool calls are needed, shows `🔧 执行工具中...` during execution then streams the follow-up response.
-- `cli` backend: deletes the placeholder then sends a new message (no streaming).
+- Send `⏳ 处理中...` before calling the backend; on completion edit that message in-place with the reply (`editMessageText`) rather than delete+send. Falls back to delete+send if the edit fails (e.g. HTML parse error).
 - Parse `[PHOTO: url]` / `[VIDEO: url]` markers from Claude's response and send media automatically
 - Always respond in Chinese (except code, shell output, technical strings)
 

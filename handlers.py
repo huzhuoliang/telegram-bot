@@ -576,14 +576,10 @@ class ClaudeHandler:
         )
         return text + stats
 
-    _STREAM_EDIT_INTERVAL = 0.5  # seconds between Telegram edits during streaming
-
-    def _call_api(self, text: str, image_data: bytes = None, stream_msg_id: int = None) -> str | None:
+    def _call_api(self, text: str, image_data: bytes = None) -> str:
         # history is already locked by caller.
         # Save state so we can roll back on any error.
-        # Returns None when streaming handled the final send/edit itself.
         import base64 as _b64
-        import time
         self._sanitize_history()
         saved_history = list(self._history)
         try:
@@ -617,113 +613,57 @@ class ClaudeHandler:
 
             last_input_tokens = 0
             total_output_tokens = 0
-            last_accumulated_text = ""
 
             for _ in range(5):  # max 5 tool-call rounds
-                if stream_msg_id and self._telegram_client:
-                    # Streaming path: accumulate text and periodically edit the message
-                    accumulated_text = ""
-                    last_edit_time = 0.0
-                    with client.messages.stream(
-                        model=self.model,
-                        max_tokens=self.max_tokens,
-                        system=self._system_prompt,
-                        messages=self._history,
-                        tools=tools,
-                    ) as stream:
-                        for chunk in stream.text_stream:
-                            accumulated_text += chunk
-                            now = time.monotonic()
-                            if now - last_edit_time >= self._STREAM_EDIT_INTERVAL:
-                                self._telegram_client.edit_message(
-                                    stream_msg_id, accumulated_text + " ▌", "HTML"
-                                )
-                                last_edit_time = now
-                        final_msg = stream.get_final_message()
-                    last_accumulated_text = accumulated_text
-                    last_input_tokens = final_msg.usage.input_tokens
-                    total_output_tokens += final_msg.usage.output_tokens
+                response = client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=self._system_prompt,
+                    messages=self._history,
+                    tools=tools,
+                )
+                last_input_tokens = response.usage.input_tokens
+                total_output_tokens += response.usage.output_tokens
 
-                    if final_msg.stop_reason != "tool_use":
-                        raw = accumulated_text.strip()
-                        logger.info("Claude stream response (stop=%s): %s", final_msg.stop_reason, raw[:500])
-                        cleaned = self._execute_actions(_convert_md_tables(raw))
-                        self._history.append({"role": "assistant", "content": final_msg.content})
-                        self._session_input_tokens += last_input_tokens
-                        self._session_output_tokens += total_output_tokens
-                        final_text = self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
-                        # Edit the streaming message to the final formatted reply
-                        if not self._telegram_client.edit_message(stream_msg_id, final_text, "HTML"):
-                            self._telegram_client.edit_message(stream_msg_id, final_text)
-                        return None  # streaming handled the send
+                # Collect text and tool_use blocks
+                text_parts = []
+                tool_calls = []
+                for block in response.content:
+                    if block.type == "text":
+                        text_parts.append(block.text)
+                    elif block.type == "tool_use":
+                        tool_calls.append(block)
 
-                    # Tool use: show indicator, execute tools, continue loop
-                    self._telegram_client.edit_message(stream_msg_id, "🔧 执行工具中...")
-                    self._history.append({"role": "assistant", "content": final_msg.content})
-                    tool_results = []
-                    for tc in [b for b in final_msg.content if b.type == "tool_use"]:
-                        result = self._handle_tool_call(tc.name, tc.input)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": result,
-                        })
-                    self._history.append({"role": "user", "content": tool_results})
-
-                else:
-                    # Non-streaming path (original behavior)
-                    response = client.messages.create(
-                        model=self.model,
-                        max_tokens=self.max_tokens,
-                        system=self._system_prompt,
-                        messages=self._history,
-                        tools=tools,
-                    )
-                    last_input_tokens = response.usage.input_tokens
-                    total_output_tokens += response.usage.output_tokens
-
-                    text_parts = []
-                    tool_calls = []
-                    for block in response.content:
-                        if block.type == "text":
-                            text_parts.append(block.text)
-                        elif block.type == "tool_use":
-                            tool_calls.append(block)
-
-                    if response.stop_reason != "tool_use" or not tool_calls:
-                        raw = "\n".join(text_parts).strip()
-                        logger.info("Claude raw response (stop=%s): %s", response.stop_reason, raw[:500])
-                        cleaned = self._execute_actions(_convert_md_tables(raw))
-                        self._history.append({"role": "assistant", "content": response.content})
-                        self._session_input_tokens += last_input_tokens
-                        self._session_output_tokens += total_output_tokens
-                        return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
-
+                if response.stop_reason != "tool_use" or not tool_calls:
+                    # Final text response
+                    raw = "\n".join(text_parts).strip()
+                    logger.info("Claude raw response (stop=%s): %s", response.stop_reason, raw[:500])
+                    cleaned = self._execute_actions(_convert_md_tables(raw))
                     self._history.append({"role": "assistant", "content": response.content})
-                    tool_results = []
-                    for tc in tool_calls:
-                        result = self._handle_tool_call(tc.name, tc.input)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": result,
-                        })
-                    self._history.append({"role": "user", "content": tool_results})
+                    self._session_input_tokens += last_input_tokens
+                    self._session_output_tokens += total_output_tokens
+                    return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
-            # Exhausted rounds — last content was already appended inside the loop
-            self._session_input_tokens += last_input_tokens
-            self._session_output_tokens += total_output_tokens
-            if stream_msg_id and self._telegram_client:
-                raw = last_accumulated_text.strip()
-                cleaned = self._execute_actions(_convert_md_tables(raw))
-                final_text = self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
-                if not self._telegram_client.edit_message(stream_msg_id, final_text, "HTML"):
-                    self._telegram_client.edit_message(stream_msg_id, final_text)
-                return None
+                # Execute tool calls and feed results back
+                self._history.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for tc in tool_calls:
+                    result = self._handle_tool_call(tc.name, tc.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": result,
+                    })
+                self._history.append({"role": "user", "content": tool_results})
+
+            # Exhausted rounds — response.content (tool_use) was already appended
+            # inside the loop; do NOT append again to avoid orphaned tool_use blocks.
             raw = "\n".join(
                 block.text for block in response.content if block.type == "text"
             ).strip()
             cleaned = self._execute_actions(_convert_md_tables(raw))
+            self._session_input_tokens += last_input_tokens
+            self._session_output_tokens += total_output_tokens
             return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
         except Exception:
@@ -737,12 +677,10 @@ class ClaudeHandler:
         processing_msg_id = None
         if self._telegram_client:
             processing_msg_id = self._telegram_client.send_message("⏳ 处理中...")
-        # For api backend, use the processing message as the streaming target
-        stream_msg_id = processing_msg_id if self.backend == "api" else None
         with self._lock:
             try:
                 if self.backend == "api":
-                    reply = self._call_api(text, stream_msg_id=stream_msg_id)
+                    reply = self._call_api(text)
                 else:
                     reply = self._call_cli(text)
             except subprocess.TimeoutExpired:
@@ -753,18 +691,12 @@ class ClaudeHandler:
                 # _call_api rolls back history on error; nothing to do here.
                 logger.warning("Claude error: %s", e)
                 reply = f"Claude 错误：{e}"
-        if reply is None:
-            # Streaming handled the send — processing message was edited in place
-            return None
-        # Non-streaming or error: edit streaming message with error, or delete+send
-        if stream_msg_id and self._telegram_client:
-            self._telegram_client.edit_message(stream_msg_id, reply)
-        else:
-            if processing_msg_id and self._telegram_client:
+        if processing_msg_id and self._telegram_client:
+            # Edit the placeholder in-place rather than delete+send
+            if not self._telegram_client.edit_message(processing_msg_id, reply, "HTML"):
                 self._telegram_client.delete_message(processing_msg_id)
-            if self._telegram_client:
                 self._telegram_client.send_message(reply, parse_mode="HTML")
-                return None
+            return None
         return reply
 
     def handle_with_image(self, text: str, file_id: str) -> str:
@@ -792,18 +724,15 @@ class ClaudeHandler:
                 os.unlink(tmp_path)
         with self._lock:
             try:
-                reply = self._call_api(text, image_data=image_data, stream_msg_id=processing_msg_id)
+                reply = self._call_api(text, image_data=image_data)
             except Exception as e:
                 logger.warning("Claude image error: %s", e)
                 reply = f"Claude 错误：{e}"
-        if reply is None:
-            return None
         if processing_msg_id and self._telegram_client:
-            self._telegram_client.edit_message(processing_msg_id, reply)
-        else:
-            if self._telegram_client:
+            if not self._telegram_client.edit_message(processing_msg_id, reply, "HTML"):
+                self._telegram_client.delete_message(processing_msg_id)
                 self._telegram_client.send_message(reply, parse_mode="HTML")
-                return None
+            return None
         return reply
 
     def help(self) -> str:
