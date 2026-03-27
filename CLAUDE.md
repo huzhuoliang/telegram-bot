@@ -50,7 +50,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ```
 bot.py              — entry point: threads, signal handling, startup/shutdown
-telegram_client.py  — Telegram Bot API wrapper (long-poll, send/delete message,
+telegram_client.py  — Telegram Bot API wrapper (long-poll, send/delete/edit message,
                       send photo/video with URL→download fallback, download file)
 router.py           — chat_id auth gate + message type dispatch
 handlers.py         — ShellHandler, ClaudeHandler (cli/api), PrivilegedClaudeHandler,
@@ -98,7 +98,9 @@ Controlled by `claude_backend` in `config.json`:
 - `"api"` — uses `anthropic` SDK directly. Requires `ANTHROPIC_API_KEY`. Maintains rolling conversation history (`claude_history_turns` turns). `anthropic` import is lazy (only loaded when this backend is active).
 
 Both backends:
-- Send `⏳ 处理中...` before calling the backend, delete it on completion
+- Send `⏳ 处理中...` before calling the backend
+- `api` backend: streams the response by editing the placeholder message in-place every 0.5 s (typewriter effect); cursor `▌` shown while generating. On completion the message is edited to the final HTML-formatted reply. When tool calls are needed, shows `🔧 执行工具中...` during execution then streams the follow-up response.
+- `cli` backend: deletes the placeholder then sends a new message (no streaming).
 - Parse `[PHOTO: url]` / `[VIDEO: url]` markers from Claude's response and send media automatically
 - Always respond in Chinese (except code, shell output, technical strings)
 

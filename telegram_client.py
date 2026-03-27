@@ -200,6 +200,24 @@ class TelegramClient:
             logger.warning("sendMessage(keyboard) exception: %s", e)
         return None
 
+    def edit_message(self, message_id: int, text: str, parse_mode: str = "") -> bool:
+        """Edit an existing message's text in-place. Returns True on success."""
+        if not text:
+            return False
+        payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text[:MAX_MESSAGE_LEN]}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        try:
+            resp = self._session.post(self._url("editMessageText"), json=payload, timeout=10)
+            if resp.ok:
+                return True
+            if "not modified" in resp.text:
+                return True
+            logger.debug("editMessageText failed: %s %s", resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.debug("editMessageText exception: %s", e)
+        return False
+
     def edit_message_keyboard(self, message_id: int, text: str, reply_markup: dict, parse_mode: str = "") -> bool:
         """Edit an existing message's text and keyboard in-place."""
         payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup}
