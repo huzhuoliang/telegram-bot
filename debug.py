@@ -18,9 +18,11 @@ import sys
 import unicodedata
 from datetime import datetime
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich import box
@@ -421,14 +423,169 @@ def run_stream(sock: socket.socket, filter_key: str | None, full: bool = False,
 
 # ── Rich Live full-screen TUI mode ──────────────────────────────────────────
 
+class _TreeRow:
+    """A row in the detail tree view."""
+    __slots__ = ("key", "value", "depth", "is_nested", "expanded", "is_last")
+
+    def __init__(self, key: str, value: object, depth: int, is_nested: bool):
+        self.key = key
+        self.value = value
+        self.depth = depth
+        self.is_nested = is_nested
+        self.expanded = False
+        self.is_last = False  # set by _update_tree_lines after expand/collapse
+
+    @property
+    def display_value(self) -> str:
+        return _value_preview(self.value)
+
+
+def _make_tree_rows(data, depth: int = 0) -> list[_TreeRow]:
+    """Build top-level tree rows from a dict or list."""
+    rows: list[_TreeRow] = []
+    if isinstance(data, dict):
+        for k, v in data.items():
+            rows.append(_TreeRow(k, v, depth, isinstance(v, (dict, list))))
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            rows.append(_TreeRow(f"[{i}]", item, depth, isinstance(item, (dict, list))))
+    _update_is_last(rows)
+    return rows
+
+
+def _update_is_last(rows: list[_TreeRow]):
+    """Mark each row's is_last flag: True if it's the last sibling at its depth.
+    This determines whether to draw └ or ├ in the tree lines."""
+    for i, row in enumerate(rows):
+        # Look forward for the next row at the same or lesser depth
+        row.is_last = True
+        for j in range(i + 1, len(rows)):
+            if rows[j].depth < row.depth:
+                break  # parent ended, we are last
+            if rows[j].depth == row.depth:
+                row.is_last = False  # there's a sibling after us
+                break
+
+
+def _tree_prefix(row: _TreeRow, rows: list[_TreeRow], idx: int) -> str:
+    """Build the tree-line prefix for a row, e.g. '│  ├▸ '."""
+    if row.depth == 0:
+        if row.is_nested:
+            return "▾ " if row.expanded else "▸ "
+        return "  "
+
+    # Build the guide lines for each ancestor depth
+    parts = []
+    for d in range(1, row.depth):
+        # Check if there's a non-last ancestor at this depth
+        has_continuation = False
+        for k in range(idx - 1, -1, -1):
+            if rows[k].depth == d:
+                has_continuation = not rows[k].is_last
+                break
+            if rows[k].depth < d:
+                break
+        parts.append("│  " if has_continuation else "   ")
+
+    # The connector for this row's own depth
+    connector = "└─ " if row.is_last else "├─ "
+    parts.append(connector)
+
+    # Expand/collapse icon for nested rows
+    if row.is_nested:
+        parts.append("▾ " if row.expanded else "▸ ")
+    else:
+        parts.append("")
+
+    return "".join(parts)
+
+
+def _expand_row(rows: list[_TreeRow], idx: int):
+    """Expand a nested row: insert its children below it."""
+    row = rows[idx]
+    if not row.is_nested or row.expanded:
+        return
+    row.expanded = True
+    children = _make_tree_rows(row.value, row.depth + 1)
+    rows[idx + 1:idx + 1] = children
+    _update_is_last(rows)
+
+
+def _collapse_row(rows: list[_TreeRow], idx: int):
+    """Collapse a nested row: remove all descendants below it."""
+    row = rows[idx]
+    if not row.is_nested or not row.expanded:
+        return
+    row.expanded = False
+    remove_end = idx + 1
+    while remove_end < len(rows) and rows[remove_end].depth > row.depth:
+        remove_end += 1
+    del rows[idx + 1:remove_end]
+    _update_is_last(rows)
+
+
+def _sanitize_line(s: str) -> str:
+    """Replace all control characters that would break single-line display."""
+    import re
+    return re.sub(r'[\x00-\x1f\x7f\x85\x2028\x2029]+', ' ', s)
+
+
+def _value_preview(v, max_len: int = 120) -> str:
+    """Short single-line preview string for a JSON value."""
+    if isinstance(v, dict):
+        return f"{{{len(v)} fields}}"
+    if isinstance(v, list):
+        return f"[{len(v)} items]"
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    s = _sanitize_line(str(v))
+    if len(s) > max_len:
+        return s[:max_len] + "..."
+    return s
+
+
 def run_live(sock: socket.socket, filter_key: str | None, full: bool = False):
-    """Full-screen TUI using Rich. Emoji are replaced with ◆ before rendering
-    to avoid terminal width calculation mismatches."""
-    import shutil, termios, tty
+    """Full-screen TUI using Rich with interactive navigation and mouse support.
+
+    List view:    ↑↓/click navigate, Enter/dblclick view detail
+    Detail view:  ↑↓/click navigate fields, Enter drill into nested / view leaf
+    Value view:   ↑↓/scroll text, Esc back
+    Esc goes back one level; Esc from list quits.
+    """
+    import os, select, shutil, termios, tty
 
     console = Console(highlight=False)
     events: list[dict] = []
     counts: dict[str, int] = {}
+
+    # ── View stack ───────────────────────────────────────────────────────
+    # Each entry: (view_type, state_dict)
+    # view_type: "list" | "detail" | "value"
+    VIEW_LIST = "list"
+    VIEW_DETAIL = "detail"
+    VIEW_VALUE = "value"
+
+    view_stack: list[tuple[str, dict]] = []
+    view_mode = VIEW_LIST
+
+    # List state
+    selected = 0
+    auto_follow = True
+
+    # Detail state (reused across stack levels)
+    detail_event = None
+    detail_data = None       # the dict/list currently being browsed
+    detail_rows = []         # one-level flattened rows
+    detail_sel = 0
+    detail_scroll = 0
+    detail_title = ""        # breadcrumb path
+
+    # Value state
+    value_text = ""
+    value_title = ""
+    value_scroll = 0
 
     _RICH_STYLES = {
         "telegram_in":   "bold cyan",
@@ -440,11 +597,87 @@ def run_live(sock: socket.socket, filter_key: str | None, full: bool = False):
         "route":         "dim",
     }
 
-    def render():
-        term = shutil.get_terminal_size((120, 40))
-        max_rows = max(3, term.lines - 5)
+    # Search state
+    search_term = ""       # current search keyword
+    search_input = False   # True when reading search input
 
-        # Stats for title
+    # Row offset for mouse click mapping (set during render)
+    _list_row_offset = 5    # rows before first event: border(1) + header(1) + separator(1) + column header(1) + col separator(1)
+    _detail_row_offset = 3  # rows before first field in detail view
+    _detail_click_map: list[int] = []  # terminal_row -> data index, built during render
+
+    def _max_rows():
+        return max(3, shutil.get_terminal_size((120, 40)).lines - 6)
+
+    def _visible():
+        return events[-_max_rows():]
+
+    def _enter_detail(ev: dict, data, title: str):
+        nonlocal view_mode, detail_event, detail_data, detail_rows, detail_sel, detail_scroll, detail_title
+        detail_event = ev
+        detail_data = data
+        detail_rows = _make_tree_rows(data)
+        detail_sel = 0
+        detail_scroll = 0
+        detail_title = title
+        view_mode = VIEW_DETAIL
+
+    def _enter_value(text: str, title: str):
+        nonlocal view_mode, value_text, value_title, value_scroll
+        value_text = text
+        value_title = title
+        value_scroll = 0
+        view_mode = VIEW_VALUE
+
+    def _push_and_enter_detail(ev: dict, data, title: str):
+        """Push current detail state onto stack, then enter new detail."""
+        view_stack.append((VIEW_DETAIL, {
+            "event": detail_event, "data": detail_data,
+            "rows": detail_rows, "sel": detail_sel,
+            "scroll": detail_scroll, "title": detail_title,
+        }))
+        _enter_detail(ev, data, title)
+
+    def _pop_view():
+        nonlocal view_mode, detail_event, detail_data, detail_rows, detail_sel, detail_scroll, detail_title
+        nonlocal value_text, value_title, value_scroll
+        if not view_stack:
+            view_mode = VIEW_LIST
+            return
+        prev_type, prev_state = view_stack.pop()
+        if prev_type == VIEW_DETAIL:
+            detail_event = prev_state["event"]
+            detail_data = prev_state["data"]
+            detail_rows = prev_state["rows"]
+            detail_sel = prev_state["sel"]
+            detail_scroll = prev_state["scroll"]
+            detail_title = prev_state["title"]
+            view_mode = VIEW_DETAIL
+        else:
+            view_mode = VIEW_LIST
+
+    # ── Search bar ────────────────────────────────────────────────────────
+
+    def _render_search_bar(width: int) -> Panel:
+        prompt = Text()
+        prompt.append(" /", style="bold yellow")
+        prompt.append(search_buf, style="bold")
+        prompt.append("█", style="bold yellow blink")
+        return Panel(
+            prompt,
+            border_style="yellow",
+            height=3,
+            width=width,
+            title="[bold yellow]Search[/]",
+            title_align="left",
+        )
+
+    # ── List view ────────────────────────────────────────────────────────
+
+    def render_list():
+        term = shutil.get_terminal_size((120, 40))
+        max_rows = _max_rows()
+
         stat_parts = []
         for t, c in sorted(counts.items()):
             style = _RICH_STYLES.get(t, "dim")
@@ -453,12 +686,13 @@ def run_live(sock: socket.socket, filter_key: str | None, full: bool = False):
 
         table = Table(box=box.SIMPLE, expand=True, show_header=True,
                       header_style="bold", padding=(0, 1))
+        table.add_column("", width=1, no_wrap=True)
         table.add_column("Time", width=12, no_wrap=True)
         table.add_column("Type", width=_LABEL_WIDTH, no_wrap=True)
         table.add_column("Details", ratio=1, no_wrap=True, overflow="ellipsis")
 
-        visible = events[-max_rows:]
-        for ev in visible:
+        visible = _visible()
+        for i, ev in enumerate(visible):
             ts = _ts(ev.get("ts", 0))
             etype = ev.get("type", "?")
             style = _RICH_STYLES.get(etype, "dim")
@@ -474,39 +708,821 @@ def run_live(sock: socket.socket, filter_key: str | None, full: bool = False):
                     details = json.dumps(ev.get("data", {}), ensure_ascii=False)
             details = _strip_emoji(details)
 
+            is_sel = (i == selected)
+            details_text = _highlight_text(details, search_term) if search_term else Text(details)
             table.add_row(
-                Text(ts, style="dim"),
-                Text(label, style=style),
-                Text(details),
+                Text("▸" if is_sel else " ", style="bold yellow" if is_sel else ""),
+                Text(ts, style="dim" if not is_sel else ""),
+                Text(label, style=style if not is_sel else ""),
+                details_text,
+                style="reverse" if is_sel else "",
             )
 
-        return Panel(
+        follow = " [green]●[/] auto" if auto_follow else " [dim]○[/] manual"
+        if search_term and not search_input:
+            sub = f"[dim]↑↓/hjkl select  Enter detail  / search  Esc quit[/]{follow}  [yellow]/{search_term}[/] n/N"
+        else:
+            sub = f"[dim]↑↓/hjkl select  Enter detail  / search  Esc quit[/]{follow}"
+        panel_h = term.lines - (3 if search_input else 0)
+        panel = Panel(
             table,
             title=f"[bold]Bot Debug Monitor[/]  │  filter: [yellow]{filter_key or 'all'}[/]  │  {stats_text}",
-            subtitle="[dim]Ctrl+C to quit  │  --full for complete data  │  --filter <api|tg|shell|tool|route>[/]",
+            subtitle=sub,
             border_style="bright_blue",
-            height=term.lines,
+            height=panel_h,
         )
+        if search_input:
+            return Group(panel, _render_search_bar(term.columns))
+        return panel
 
+    # ── Detail view ──────────────────────────────────────────────────────
+
+    def render_detail():
+        nonlocal detail_scroll
+        term = shutil.get_terminal_size((120, 40))
+        ev = detail_event
+        etype = ev.get("type", "?")
+        ts = _ts(ev.get("ts", 0))
+        style = _RICH_STYLES.get(etype, "dim")
+        content_h = max(3, term.lines - 6)
+
+        if detail_sel < detail_scroll:
+            detail_scroll = detail_sel
+        elif detail_sel >= detail_scroll + content_h:
+            detail_scroll = detail_sel - content_h + 1
+
+        table = Table(box=None, expand=True, show_header=True,
+                      header_style="bold", padding=(0, 1))
+        table.add_column("", width=1, no_wrap=True)
+        table.add_column("Field", min_width=20, max_width=40, no_wrap=True)
+        table.add_column("Value", ratio=1, no_wrap=True, overflow="ellipsis")
+
+        _detail_click_map.clear()
+        visible_rows = detail_rows[detail_scroll:detail_scroll + content_h]
+        for i, trow in enumerate(visible_rows):
+            abs_i = detail_scroll + i
+            is_sel = (abs_i == detail_sel)
+            preview = _strip_emoji(trow.display_value)
+            marker = "▸" if is_sel else " "
+            prefix = _tree_prefix(trow, detail_rows, abs_i)
+            field_text = _strip_emoji(f"{prefix}{trow.key}")
+            _detail_click_map.append(abs_i)
+            field_display = _highlight_text(field_text, search_term) if search_term else Text(field_text, style="bold" if is_sel else "dim")
+            value_display = _highlight_text(preview, search_term) if search_term else Text(preview)
+            table.add_row(
+                Text(marker, style="bold yellow" if is_sel else ""),
+                field_display,
+                value_display,
+                style="reverse" if is_sel else "",
+            )
+
+        breadcrumb = detail_title or "data"
+        depth = len(view_stack)
+        pos = f"  {detail_sel + 1}/{len(detail_rows)}" if detail_rows else ""
+        if search_term and not search_input:
+            sub = f"[dim]↑↓/hjkl navigate  ←→ collapse/expand  Enter drill  / search  Esc back ({depth})[/]  [yellow]/{search_term}[/] n/N"
+        else:
+            sub = f"[dim]↑↓/hjkl navigate  ←→ collapse/expand  Enter drill  / search  Esc back ({depth})[/]"
+        panel_h = term.lines - (3 if search_input else 0)
+        panel = Panel(
+            table,
+            title=f"[bold]{breadcrumb}[/]  │  [{style}]{etype}[/]  {ts}{pos}",
+            subtitle=sub,
+            border_style="yellow",
+            height=panel_h,
+        )
+        if search_input:
+            return Group(panel, _render_search_bar(term.columns))
+        return panel
+
+    # ── Value view ───────────────────────────────────────────────────────
+
+    def render_value():
+        nonlocal value_scroll
+        term = shutil.get_terminal_size((120, 40))
+        panel_h = term.lines - (3 if search_input else 0)
+        content_h = max(3, panel_h - 5)
+
+        text = _strip_emoji(value_text)
+        try:
+            parsed = json.loads(text)
+            text = json.dumps(parsed, ensure_ascii=False, indent=2)
+            is_json = True
+        except (json.JSONDecodeError, TypeError):
+            is_json = False
+
+        lines = text.split("\n")
+        total = len(lines)
+        max_scroll = max(0, total - content_h)
+        value_scroll = min(value_scroll, max_scroll)
+        visible = lines[value_scroll:value_scroll + content_h]
+
+        if search_term and not is_json:
+            # Plain text: highlight search matches
+            content = Text()
+            for i, line in enumerate(visible):
+                if i > 0:
+                    content.append("\n")
+                content.append_text(_highlight_text(line, search_term))
+        elif search_term and is_json:
+            # JSON: can't use Syntax with highlights, fall back to Text with highlights
+            content = Text()
+            for i, line in enumerate(visible):
+                if i > 0:
+                    content.append("\n")
+                content.append_text(_highlight_text(line, search_term))
+        elif is_json:
+            content = Syntax("\n".join(visible), "json",
+                             theme="ansi_dark", line_numbers=False, word_wrap=False)
+        else:
+            content = Text("\n".join(visible))
+
+        pos = f"  lines {value_scroll+1}-{min(value_scroll+content_h, total)}/{total}"
+        if search_term and not search_input:
+            # Count matches
+            lower = search_term.lower()
+            match_lines = [i for i, l in enumerate(lines) if lower in l.lower()]
+            match_info = f"  [yellow]/{search_term}[/] {len(match_lines)} matches  n/N"
+            sub = f"[dim]↑↓/jk scroll  / search  Esc back[/]{match_info}"
+        else:
+            sub = "[dim]↑↓/jk scroll  / search  Esc back[/]"
+        panel = Panel(
+            content,
+            title=f"[bold]{_strip_emoji(value_title)}[/]{pos}",
+            subtitle=sub,
+            border_style="green",
+            height=panel_h,
+        )
+        if search_input:
+            return Group(panel, _render_search_bar(term.columns))
+        return panel
+
+    # ── Input reading (keyboard + mouse) ─────────────────────────────────
+
+    def _read_input(fd: int) -> tuple[str | None, int, int]:
+        """Returns (action, row, col). row/col only meaningful for mouse events.
+        Actions: 'up','down','enter','esc','backspace','q','click','scroll_up','scroll_down' or None."""
+        if not select.select([fd], [], [], 0)[0]:
+            return None, 0, 0
+        ch = os.read(fd, 1)
+        if ch == b'\x1b':
+            if not select.select([fd], [], [], 0.02)[0]:
+                return 'esc', 0, 0
+            ch2 = os.read(fd, 1)
+            if ch2 == b'[':
+                # Read until we have a complete sequence
+                buf = b""
+                while select.select([fd], [], [], 0.02)[0]:
+                    b = os.read(fd, 1)
+                    buf += b
+                    # Arrow keys: single letter
+                    if b == b'A': return 'up', 0, 0
+                    if b == b'B': return 'down', 0, 0
+                    if b == b'C': return 'right', 0, 0
+                    if b == b'D': return 'left', 0, 0
+                    if b == b'H': return 'home', 0, 0
+                    if b == b'F': return 'end', 0, 0
+                    # Tilde-terminated: ESC[5~ PgUp, ESC[6~ PgDn, ESC[1~ Home, ESC[4~ End
+                    if b == b'~':
+                        num = buf[:-1]  # everything before ~
+                        if num == b'5': return 'pgup', 0, 0
+                        if num == b'6': return 'pgdn', 0, 0
+                        if num == b'1': return 'home', 0, 0
+                        if num == b'4': return 'end', 0, 0
+                        return None, 0, 0
+                    # SGR mouse: ESC [ < ... M or ... m
+                    if b in (b'M', b'm'):
+                        # Parse SGR mouse: <btn;col;row M/m
+                        try:
+                            parts = buf[1:-1].decode()  # skip '<', strip M/m
+                            segs = parts.split(";")
+                            btn = int(segs[0])
+                            col = int(segs[1])
+                            row = int(segs[2])
+                            is_release = (b == b'm')
+                            if btn == 0 and is_release:  # left click release
+                                return 'click', row, col
+                            if btn == 64:  # scroll up
+                                return 'scroll_up', row, col
+                            if btn == 65:  # scroll down
+                                return 'scroll_down', row, col
+                        except (ValueError, IndexError):
+                            pass
+                        return None, 0, 0
+                return None, 0, 0
+            # Drain
+            while select.select([fd], [], [], 0.01)[0]:
+                os.read(fd, 1)
+            return None, 0, 0
+        if ch in (b'\r', b'\n'): return 'enter', 0, 0
+        if ch in (b'\x7f', b'\x08'): return 'backspace', 0, 0
+        if ch in (b'q', b'Q'): return 'q', 0, 0
+        if ch == b'k': return 'up', 0, 0
+        if ch == b'j': return 'down', 0, 0
+        if ch == b'h': return 'left', 0, 0
+        if ch == b'l': return 'right', 0, 0
+        if ch == b'/': return 'search', 0, 0
+        if ch == b'n': return 'search_next', 0, 0
+        if ch == b'N': return 'search_prev', 0, 0
+        return None, 0, 0
+
+    # ── Search helpers ────────────────────────────────────────────────────
+
+    # Search input buffer (used when search_input mode is active)
+    search_buf = ""
+
+    def _highlight_text(text: str, term: str) -> Text:
+        """Create a Rich Text with search term highlighted."""
+        if not term:
+            return Text(text)
+        result = Text()
+        lower_text = text.lower()
+        lower_term = term.lower()
+        i = 0
+        while i < len(text):
+            pos = lower_text.find(lower_term, i)
+            if pos == -1:
+                result.append(text[i:])
+                break
+            if pos > i:
+                result.append(text[i:pos])
+            result.append(text[pos:pos + len(term)], style="black on yellow")
+            i = pos + len(term)
+        return result
+
+    def _find_matches_list(term: str, events_list: list[dict]) -> list[int]:
+        """Find indices in events_list that match the search term."""
+        if not term:
+            return []
+        lower = term.lower()
+        return [i for i, ev in enumerate(events_list)
+                if lower in json.dumps(ev.get("data", {}), ensure_ascii=False).lower()
+                or lower in ev.get("type", "").lower()]
+
+    def _find_matches_detail(term: str, rows: list) -> list[int]:
+        """Find indices in detail_rows that match the search term."""
+        if not term:
+            return []
+        lower = term.lower()
+        return [i for i, trow in enumerate(rows)
+                if lower in trow.key.lower() or lower in str(trow.value).lower()]
+
+    # ── Main loop ────────────────────────────────────────────────────────
+
+    sock.setblocking(False)
+    sock_buf = b""
     fd = sys.stdin.fileno()
     old_attrs = termios.tcgetattr(fd)
+
+    # SGR mouse mode: works over SSH in Windows Terminal
+    MOUSE_ON = "\033[?1000h\033[?1006h"   # enable button events + SGR encoding
+    MOUSE_OFF = "\033[?1000l\033[?1006l"
+
     try:
         tty.setcbreak(fd)
-        with Live(render(), console=console, refresh_per_second=2, screen=True) as live:
-            for event in iter_events(sock):
-                etype = event.get("type", "")
-                if not _matches_filter(etype, filter_key):
-                    continue
-                events.append(event)
-                counts[etype] = counts.get(etype, 0) + 1
-                if len(events) > 200:
-                    events[:] = events[-100:]
-                live.update(render())
+        sys.stdout.write(MOUSE_ON)
+        sys.stdout.flush()
+
+        def _read_raw_char(fd: int) -> bytes | None:
+            """Read a single raw byte if available."""
+            if not select.select([fd], [], [], 0)[0]:
+                return None
+            return os.read(fd, 1)
+
+        def _handle_search_char(ch: bytes) -> bool:
+            """Process a char during search input. Returns True if search mode ended."""
+            nonlocal search_input, search_buf, search_term
+            if ch in (b'\r', b'\n'):
+                # Confirm search
+                search_term = search_buf
+                search_input = False
+                return True
+            if ch == b'\x1b':
+                # Cancel search
+                while select.select([fd], [], [], 0.02)[0]:
+                    os.read(fd, 1)
+                search_buf = ""
+                search_input = False
+                return True
+            if ch in (b'\x7f', b'\x08'):
+                search_buf = search_buf[:-1]
+                return False
+            try:
+                search_buf += ch.decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            return False
+
+        def _apply_search_list():
+            nonlocal selected, auto_follow
+            if search_term:
+                matches = _find_matches_list(search_term, _visible())
+                if matches:
+                    auto_follow = False
+                    selected = matches[0]
+
+        def _apply_search_detail():
+            nonlocal detail_sel
+            if search_term:
+                matches = _find_matches_detail(search_term, detail_rows)
+                if matches:
+                    detail_sel = matches[0]
+
+        def _get_value_lines() -> list[str]:
+            """Get the processed value text lines (same logic as render_value)."""
+            text = _strip_emoji(value_text)
+            try:
+                parsed = json.loads(text)
+                text = json.dumps(parsed, ensure_ascii=False, indent=2)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return text.split("\n")
+
+        def _apply_search_value():
+            nonlocal value_scroll
+            if search_term:
+                lower = search_term.lower()
+                for i, line in enumerate(_get_value_lines()):
+                    if lower in line.lower():
+                        value_scroll = i
+                        return
+
+        def _value_search_jump(direction: int):
+            """Jump to next (direction=1) or prev (direction=-1) search match in value view."""
+            nonlocal value_scroll
+            lower = search_term.lower()
+            lines = _get_value_lines()
+            if direction > 0:
+                for i in range(value_scroll + 1, len(lines)):
+                    if lower in lines[i].lower():
+                        value_scroll = i
+                        return
+                # Wrap around
+                for i in range(0, value_scroll):
+                    if lower in lines[i].lower():
+                        value_scroll = i
+                        return
+            else:
+                for i in range(value_scroll - 1, -1, -1):
+                    if lower in lines[i].lower():
+                        value_scroll = i
+                        return
+                for i in range(len(lines) - 1, value_scroll, -1):
+                    if lower in lines[i].lower():
+                        value_scroll = i
+                        return
+
+        with Live(render_list(), console=console, auto_refresh=False, screen=True) as live:
+            live.refresh()
+            while True:
+                need_render = False
+
+                # ── Search input mode: raw char processing ──
+                if search_input:
+                    ch = _read_raw_char(fd)
+                    if ch:
+                        ended = _handle_search_char(ch)
+                        need_render = True
+                        if ended and search_term:
+                            if view_mode == VIEW_LIST:
+                                _apply_search_list()
+                            elif view_mode == VIEW_DETAIL:
+                                _apply_search_detail()
+                            elif view_mode == VIEW_VALUE:
+                                _apply_search_value()
+                else:
+                    # ── Normal key processing ──
+                    while True:
+                        action, row, col = _read_input(fd)
+                        if not action:
+                            break
+                        need_render = True
+
+                        if view_mode == VIEW_LIST:
+                            visible = _visible()
+                            if action in ('up', 'scroll_up'):
+                                auto_follow = False
+                                selected = max(0, selected - 1)
+                            elif action in ('down', 'scroll_down'):
+                                if selected < len(visible) - 1:
+                                    selected += 1
+                                else:
+                                    auto_follow = True
+                            elif action == 'home':
+                                auto_follow = False
+                                selected = 0
+                            elif action == 'end':
+                                selected = max(0, len(visible) - 1)
+                                auto_follow = True
+                            elif action == 'pgup':
+                                auto_follow = False
+                                selected = max(0, selected - _max_rows())
+                            elif action == 'pgdn':
+                                selected = min(max(0, len(visible) - 1), selected + _max_rows())
+                                if selected >= len(visible) - 1:
+                                    auto_follow = True
+                            elif action == 'click':
+                                idx = row - _list_row_offset
+                                if 0 <= idx < len(visible):
+                                    auto_follow = False
+                                    if selected == idx:
+                                        detail_event = visible[selected]
+                                        view_stack.clear()
+                                        _enter_detail(detail_event, detail_event.get("data", {}), "data")
+                                    else:
+                                        selected = idx
+                            elif action == 'enter':
+                                if visible and 0 <= selected < len(visible):
+                                    detail_event = visible[selected]
+                                    view_stack.clear()
+                                    _enter_detail(detail_event, detail_event.get("data", {}), "data")
+                            elif action == 'search':
+                                search_input = True
+                                search_buf = ""
+                                break  # exit key loop, re-enter as search input mode
+                            elif action == 'search_next':
+                                if search_term:
+                                    matches = _find_matches_list(search_term, _visible())
+                                    after = [m for m in matches if m > selected]
+                                    selected = after[0] if after else (matches[0] if matches else selected)
+                                    auto_follow = False
+                            elif action == 'search_prev':
+                                if search_term:
+                                    matches = _find_matches_list(search_term, _visible())
+                                    before = [m for m in matches if m < selected]
+                                    selected = before[-1] if before else (matches[-1] if matches else selected)
+                                    auto_follow = False
+                            elif action in ('esc', 'q'):
+                                if search_term:
+                                    search_term = ""
+                                else:
+                                    sys.stdout.write(MOUSE_OFF)
+                                    sys.stdout.flush()
+                                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+                                    return
+
+                        elif view_mode == VIEW_DETAIL:
+                            if action in ('up', 'scroll_up'):
+                                detail_sel = max(0, detail_sel - 1)
+                            elif action in ('down', 'scroll_down'):
+                                detail_sel = min(len(detail_rows) - 1, detail_sel + 1)
+                            elif action == 'home':
+                                detail_sel = 0
+                            elif action == 'end':
+                                detail_sel = max(0, len(detail_rows) - 1)
+                            elif action == 'pgup':
+                                detail_sel = max(0, detail_sel - _max_rows())
+                            elif action == 'pgdn':
+                                detail_sel = min(max(0, len(detail_rows) - 1), detail_sel + _max_rows())
+                            elif action == 'right':
+                                if detail_rows and 0 <= detail_sel < len(detail_rows):
+                                    trow = detail_rows[detail_sel]
+                                    if trow.is_nested and not trow.expanded:
+                                        _expand_row(detail_rows, detail_sel)
+                            elif action == 'left':
+                                if detail_rows and 0 <= detail_sel < len(detail_rows):
+                                    trow = detail_rows[detail_sel]
+                                    if trow.is_nested and trow.expanded:
+                                        _collapse_row(detail_rows, detail_sel)
+                                    elif trow.depth > 0:
+                                        parent_depth = trow.depth - 1
+                                        for pi in range(detail_sel - 1, -1, -1):
+                                            if detail_rows[pi].depth == parent_depth and detail_rows[pi].is_nested:
+                                                detail_sel = pi
+                                                break
+                            elif action == 'click':
+                                map_idx = row - _detail_row_offset
+                                if 0 <= map_idx < len(_detail_click_map):
+                                    abs_idx = _detail_click_map[map_idx]
+                                    if detail_sel == abs_idx:
+                                        action = 'enter'
+                                    else:
+                                        detail_sel = abs_idx
+                            elif action == 'search':
+                                search_input = True
+                                search_buf = ""
+                                break
+                            elif action == 'search_next':
+                                if search_term:
+                                    matches = _find_matches_detail(search_term, detail_rows)
+                                    after = [m for m in matches if m > detail_sel]
+                                    detail_sel = after[0] if after else (matches[0] if matches else detail_sel)
+                            elif action == 'search_prev':
+                                if search_term:
+                                    matches = _find_matches_detail(search_term, detail_rows)
+                                    before = [m for m in matches if m < detail_sel]
+                                    detail_sel = before[-1] if before else (matches[-1] if matches else detail_sel)
+                            elif action in ('esc', 'backspace'):
+                                if search_term:
+                                    search_term = ""
+                                else:
+                                    _pop_view()
+
+                            if action == 'enter':
+                                if detail_rows and 0 <= detail_sel < len(detail_rows):
+                                    trow = detail_rows[detail_sel]
+                                    path = f"{detail_title}.{trow.key}" if detail_title else trow.key
+                                    if trow.is_nested and isinstance(trow.value, (dict, list)):
+                                        _push_and_enter_detail(detail_event, trow.value, path)
+                                    else:
+                                        sv = json.dumps(trow.value, ensure_ascii=False, indent=2) if isinstance(trow.value, (dict, list)) else str(trow.value)
+                                        view_stack.append((VIEW_DETAIL, {
+                                            "event": detail_event, "data": detail_data,
+                                            "rows": detail_rows, "sel": detail_sel,
+                                            "scroll": detail_scroll, "title": detail_title,
+                                        }))
+                                        _enter_value(sv, path)
+
+                        elif view_mode == VIEW_VALUE:
+                            if action in ('up', 'scroll_up'):
+                                value_scroll = max(0, value_scroll - 1)
+                            elif action in ('down', 'scroll_down'):
+                                value_scroll += 1
+                            elif action == 'home':
+                                value_scroll = 0
+                            elif action == 'end':
+                                value_scroll = 999999  # clamped in render_value
+                            elif action == 'pgup':
+                                value_scroll = max(0, value_scroll - _max_rows())
+                            elif action == 'pgdn':
+                                value_scroll += _max_rows()  # clamped in render_value
+                            elif action == 'search':
+                                search_input = True
+                                search_buf = ""
+                                break
+                            elif action == 'search_next':
+                                if search_term:
+                                    _value_search_jump(1)
+                            elif action == 'search_prev':
+                                if search_term:
+                                    _value_search_jump(-1)
+                            elif action in ('esc', 'backspace'):
+                                if search_term:
+                                    search_term = ""
+                                else:
+                                    _pop_view()
+                            elif action in ('enter', 'q'):
+                                _pop_view()
+
+                # Read socket (EOF just stops reading, doesn't exit — for demo mode)
+                sock_alive = True
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        sock_alive = False
+                    else:
+                        sock_buf += chunk
+                except BlockingIOError:
+                    pass
+                except (ConnectionResetError, OSError):
+                    sock_alive = False
+
+                while b"\n" in sock_buf:
+                    line, sock_buf = sock_buf.split(b"\n", 1)
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    etype = event.get("type", "")
+                    if not _matches_filter(etype, filter_key):
+                        continue
+                    events.append(event)
+                    counts[etype] = counts.get(etype, 0) + 1
+                    if len(events) > 500:
+                        events[:] = events[-250:]
+                    if view_mode == VIEW_LIST:
+                        need_render = True
+
+                if need_render:
+                    if view_mode == VIEW_LIST:
+                        if auto_follow:
+                            selected = max(0, len(_visible()) - 1)
+                        live.update(render_list())
+                    elif view_mode == VIEW_DETAIL:
+                        live.update(render_detail())
+                    elif view_mode == VIEW_VALUE:
+                        live.update(render_value())
+                    live.refresh()
+
+                wait_fds = [fd, sock] if sock_alive else [fd]
+                select.select(wait_fds, [], [], 0.03)
+
     except KeyboardInterrupt:
         pass
     finally:
+        sys.stdout.write(MOUSE_OFF)
+        sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
     console.print("[dim]Disconnected.[/]")
+
+
+# ── Demo data ────────────────────────────────────────────────────────────────
+
+def _generate_demo_events() -> list[dict]:
+    """Generate realistic sample events for --demo mode."""
+    import time as _time
+    t = _time.time()
+    return [
+        {"ts": t - 30, "type": "telegram_in", "data": {
+            "message": {"chat": {"id": 12345}, "from": {"first_name": "Alice"},
+                        "text": "$统计一下磁盘使用情况，多用 emoji 表情 🖥️💾📊"}}},
+        {"ts": t - 29.9, "type": "route", "data": {
+            "handler": "privileged_claude", "reason": "$ prefix",
+            "text": "$统计一下磁盘使用情况"}},
+        {"ts": t - 29, "type": "telegram_out", "data": {
+            "method": "sendMessage", "payload": {"text": "⏳ 处理中..."}, "status": 200}},
+        {"ts": t - 28.8, "type": "api_request", "data": {
+            "model": "claude-sonnet-4-6", "max_tokens": 4096, "round": 0,
+            "system": "You are a helpful assistant running as a Telegram bot on the user's personal Linux server...(1769 chars)",
+            "messages": [
+                {"role": "user", "content": "统计一下磁盘使用情况，多用emoji表情"},
+                {"role": "assistant", "content": "好的，让我查看磁盘信息。"},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "exit 0\nFilesystem  Size  Used  Avail  Use%  Mounted on\n/dev/sda1  98G  34G  60G  37%  /\ntmpfs  4.7G  2.2M  4.7G  1%  /run"}]},
+            ],
+            "tools": ["run_shell_command", "read_file", "write_file"]}},
+        {"ts": t - 25, "type": "api_response", "data": {
+            "stop_reason": "tool_use", "round": 0,
+            "text": "让我先查看磁盘使用情况 🔍",
+            "usage": {"input_tokens": 1850, "output_tokens": 120},
+            "tool_calls": [{"name": "run_shell_command", "input": {"command": "df -h && echo '---' && lsblk"}}]}},
+        {"ts": t - 24, "type": "tool_call", "data": {
+            "name": "run_shell_command",
+            "input": {"command": "df -h && echo '---' && lsblk"},
+            "result": "exit 0\nFilesystem                         Size  Used Avail Use% Mounted on\ntmpfs                              4.7G  2.2M  4.7G   1% /run\n/dev/mapper/ubuntu--vg-ubuntu--lv   98G   34G   60G  37% /\ntmpfs                              4.7G     0  4.7G   0% /dev/shm\ntmpfs                              5.0M     0  5.0M   0% /run/lock\n/dev/sda2                          2.0G  253M  1.6G  14% /boot\n---\nNAME                      MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS\nsda                         8:0    0  100G  0 disk\n├─sda1                      8:1    0    1M  0 part\n├─sda2                      8:2    0    2G  0 part /boot\n└─sda3                      8:3    0   98G  0 part\n  └─ubuntu--vg-ubuntu--lv 253:0    0   98G  0 lvm  /"}},
+        {"ts": t - 23, "type": "shell_exec", "data": {
+            "command": "df -h && echo '---' && lsblk",
+            "output": "exit 0\nFilesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  98G  34G  60G  37%  /",
+            "exit_code": 0, "handler": "privileged"}},
+        {"ts": t - 20, "type": "api_request", "data": {
+            "model": "claude-sonnet-4-6", "max_tokens": 4096, "round": 1,
+            "system": "You are a helpful assistant...",
+            "messages": [{"role": "user", "content": "统计磁盘"}, {"role": "assistant", "content": "..."}],
+            "tools": ["run_shell_command", "read_file", "write_file"]}},
+        {"ts": t - 15, "type": "api_response", "data": {
+            "stop_reason": "end_turn", "round": 1,
+            "text": "以下是你的服务器磁盘使用情况 💽✨\n\n🗂️ 本地磁盘分区\n🟢 系统根目录 /\n├ 💾 总大小：98 GB\n├ 🔴 已使用：34 GB（37%）\n├ 🟢 可用：60 GB\n\n📊 总结：磁盘使用率 37%，空间充足。",
+            "usage": {"input_tokens": 3200, "output_tokens": 580}}},
+        {"ts": t - 14, "type": "telegram_out", "data": {
+            "method": "editMessageText",
+            "payload": {"text": "以下是你的服务器磁盘使用情况 💽✨\n\n<b>🗂️ 本地磁盘分区</b>\n🟢 <b>系统根目录</b> <code>/</code>\n├ 💾 总大小：<code>98 GB</code>\n├ 🔴 已使用：<code>34 GB</code>（37%）\n├ 🟢 可用：<code>60 GB</code>\n\n<b>📊 总结</b>：磁盘使用率 37%，空间充足。\n\n<code>━━━\n📊 in 3,200 · out 580 · ctx 1.6%\n💰 session in 5,050 / out 700</code>",
+                        "parse_mode": "HTML"},
+            "status": 200}},
+        # Large text event for testing scroll
+        {"ts": t - 10, "type": "api_response", "data": {
+            "stop_reason": "end_turn", "round": 0,
+            "text": (
+                "# 服务器完整健康检查报告\n\n"
+                "## 1. 系统概况\n"
+                "操作系统: Ubuntu 22.04.3 LTS (Jammy Jellyfish)\n"
+                "内核版本: 6.8.0-60-generic\n"
+                "主机名: prod-server-01\n"
+                "运行时间: 42 天 3 小时 17 分钟\n"
+                "系统负载: 0.15, 0.22, 0.18 (1/5/15 min)\n\n"
+                "## 2. CPU 信息\n"
+                "型号: Intel Xeon E5-2680 v4 @ 2.40GHz\n"
+                "核心数: 8 核 16 线程\n"
+                "当前频率: 2.40 GHz (最大 3.30 GHz turbo)\n"
+                "CPU 使用率:\n"
+                "  用户态: 12.3%\n"
+                "  系统态: 3.7%\n"
+                "  I/O 等待: 0.5%\n"
+                "  空闲: 83.5%\n\n"
+                "## 3. 内存使用\n"
+                "物理内存总计: 32,768 MB (32 GB)\n"
+                "已使用: 18,432 MB (56.3%)\n"
+                "可用: 14,336 MB (43.7%)\n"
+                "缓存/缓冲: 8,192 MB\n"
+                "Swap 总计: 4,096 MB\n"
+                "Swap 已使用: 128 MB (3.1%)\n\n"
+                "## 4. 磁盘使用详情\n"
+                "### 4.1 挂载点\n"
+                "| 文件系统 | 大小 | 已用 | 可用 | 使用率 | 挂载点 |\n"
+                "| /dev/mapper/ubuntu--vg-ubuntu--lv | 98G | 34G | 60G | 37% | / |\n"
+                "| /dev/sda2 | 2.0G | 253M | 1.6G | 14% | /boot |\n"
+                "| tmpfs | 4.7G | 2.2M | 4.7G | 1% | /run |\n"
+                "| /dev/sdb1 | 500G | 312G | 188G | 63% | /data |\n\n"
+                "### 4.2 磁盘 I/O 统计\n"
+                "sda: 读取 1.2 MB/s, 写入 3.4 MB/s, IOPS 读 150 写 420\n"
+                "sdb: 读取 8.7 MB/s, 写入 12.1 MB/s, IOPS 读 890 写 1250\n\n"
+                "### 4.3 inode 使用\n"
+                "/dev/mapper/ubuntu--vg-ubuntu--lv: 已用 523,412 / 总计 6,553,600 (8%)\n"
+                "/dev/sdb1: 已用 1,847,293 / 总计 32,768,000 (5.6%)\n\n"
+                "## 5. 网络状态\n"
+                "### 5.1 接口列表\n"
+                "eth0: 192.168.1.100/24 (UP, MTU 1500)\n"
+                "  MAC: 00:11:22:33:44:55\n"
+                "  RX: 156.7 GB (packets: 124,892,341)\n"
+                "  TX: 89.3 GB (packets: 67,234,128)\n"
+                "  RX errors: 0, TX errors: 0\n"
+                "lo: 127.0.0.1/8 (UP, MTU 65536)\n\n"
+                "### 5.2 监听端口\n"
+                "tcp  0.0.0.0:22    sshd\n"
+                "tcp  0.0.0.0:80    nginx\n"
+                "tcp  0.0.0.0:443   nginx\n"
+                "tcp  127.0.0.1:5432  postgresql\n"
+                "tcp  127.0.0.1:6379  redis-server\n"
+                "tcp  127.0.0.1:8765  telegram_bot (notify_server)\n"
+                "tcp  0.0.0.0:2080  sing-box\n\n"
+                "### 5.3 活跃连接\n"
+                "ESTABLISHED: 47\n"
+                "TIME_WAIT: 12\n"
+                "CLOSE_WAIT: 3\n"
+                "LISTEN: 8\n\n"
+                "## 6. 进程信息\n"
+                "### 6.1 TOP 10 CPU 占用\n"
+                "PID    USER     %CPU  %MEM  COMMAND\n"
+                "1234   www-data  8.2   3.1  nginx: worker process\n"
+                "2345   postgres  5.7   12.4  postgres: autovacuum\n"
+                "3456   root      3.2   0.8  sing-box run\n"
+                "4567   user      2.1   4.5  python3 bot.py\n"
+                "5678   redis     1.8   2.3  redis-server *:6379\n"
+                "6789   www-data  1.5   2.8  nginx: worker process\n"
+                "7890   root      1.2   0.5  sshd: user@pts/0\n"
+                "8901   postgres  0.9   8.7  postgres: wal writer\n"
+                "9012   root      0.7   0.3  systemd-journald\n"
+                "0123   root      0.5   0.2  cron\n\n"
+                "### 6.2 服务状态\n"
+                "● nginx.service - active (running) since 42 days ago\n"
+                "● postgresql.service - active (running) since 42 days ago\n"
+                "● redis-server.service - active (running) since 42 days ago\n"
+                "● sing-box.service - active (running) since 3 days ago\n"
+                "● telegram_bot.service - active (running) since 1 day ago\n"
+                "● cron.service - active (running) since 42 days ago\n"
+                "● ssh.service - active (running) since 42 days ago\n\n"
+                "## 7. 安全检查\n"
+                "### 7.1 最近登录\n"
+                "user  pts/0  192.168.1.50  Apr  2 14:20  still logged in\n"
+                "user  pts/1  192.168.1.50  Apr  1 09:30 - Apr  1 18:45\n"
+                "root  tty1   (console)     Mar 28 03:15 - Mar 28 03:20\n\n"
+                "### 7.2 失败登录尝试 (最近24小时)\n"
+                "总计: 847 次\n"
+                "来源 IP 分布:\n"
+                "  45.148.10.x: 312 次 (中国)\n"
+                "  185.224.128.x: 198 次 (俄罗斯)\n"
+                "  103.99.0.x: 156 次 (印度)\n"
+                "  其他: 181 次\n"
+                "全部被 fail2ban 拦截，无成功入侵。\n\n"
+                "### 7.3 防火墙状态\n"
+                "UFW: active\n"
+                "规则: 允许 22/tcp, 80/tcp, 443/tcp, 2080/tcp\n"
+                "默认策略: deny incoming, allow outgoing\n"
+                "fail2ban jails: sshd (active, 23 banned IPs)\n\n"
+                "## 8. 定时任务\n"
+                "0 3 * * * /usr/bin/python3 /usr/local/bin/update-singbox-sub.py\n"
+                "0 4 * * 0 /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1\n"
+                "*/5 * * * * /usr/local/bin/healthcheck.sh\n"
+                "0 0 * * * /usr/bin/certbot renew --quiet\n"
+                "30 2 * * * /usr/bin/apt-get update -qq\n\n"
+                "## 9. 日志摘要 (最近24小时)\n"
+                "### 9.1 系统日志\n"
+                "syslog: 12,345 条 (其中 ERROR: 3, WARNING: 27)\n"
+                "kern.log: 892 条 (无异常)\n"
+                "auth.log: 1,847 条 (847 次失败登录)\n\n"
+                "### 9.2 应用日志\n"
+                "nginx access.log: 45,678 条请求\n"
+                "  200: 42,312 (92.6%)\n"
+                "  301: 1,234 (2.7%)\n"
+                "  404: 1,567 (3.4%)\n"
+                "  500: 23 (0.05%)\n"
+                "  502: 542 (1.2%)\n"
+                "postgresql: 2,341 条 (慢查询: 7 条, >1s)\n"
+                "telegram_bot: 456 条 (ERROR: 0, WARNING: 2)\n\n"
+                "## 10. 最近系统事件日志 (详细)\n"
+                + "".join(
+                    f"[{i:04d}] Apr 02 {10+i//60:02d}:{i%60:02d}:00 prod-server-01 "
+                    f"{'sshd' if i%5==0 else 'nginx' if i%5==1 else 'postgresql' if i%5==2 else 'sing-box' if i%5==3 else 'telegram_bot'}"
+                    f"[{10000+i}]: "
+                    f"{'Connection from 45.148.10.' + str(i%256) + ' port ' + str(40000+i) + ' - Failed password for invalid user admin' if i%5==0 else ''}"
+                    f"{'GET /api/v1/status HTTP/1.1 200 ' + str(100+i*3) + 'B ' + str(5+i%20) + 'ms - 192.168.1.' + str(i%50+10) if i%5==1 else ''}"
+                    f"{'LOG:  duration: ' + str(50+i*7) + '.' + str(i%100) + ' ms  statement: SELECT * FROM events WHERE created_at > now() - interval ' + repr(str(i) + ' hours') + ' ORDER BY id DESC LIMIT 100' if i%5==2 else ''}"
+                    f"{'[INFO] router: matched rule geosite-cn for domain cdn' + str(i) + '.example.com -> direct' if i%5==3 else ''}"
+                    f"{'INFO handlers: Claude raw response (stop=end_turn): 这是第' + str(i) + '条测试消息的响应内容...' if i%5==4 else ''}"
+                    "\n"
+                    for i in range(200)
+                ) +
+                "\n## 11. 总结与建议\n"
+                "1. 系统整体健康，负载较低，资源充足\n"
+                "2. /data 分区使用率 63%，建议关注增长趋势\n"
+                "3. 502 错误率略高 (1.2%)，建议检查 nginx upstream 配置\n"
+                "4. 7 条慢查询需要优化，建议添加索引或优化 SQL\n"
+                "5. SSH 暴力破解尝试频繁，fail2ban 运行正常，建议考虑改用密钥认证\n"
+                "6. 所有关键服务运行正常，无需立即干预\n"
+            ),
+            "usage": {"input_tokens": 5200, "output_tokens": 3800},
+            "tool_calls": []}},
+        {"ts": t - 5, "type": "telegram_in", "data": {
+            "message": {"chat": {"id": 12345}, "from": {"first_name": "Alice"},
+                        "text": "!uptime"}}},
+        {"ts": t - 4.9, "type": "route", "data": {
+            "handler": "shell", "reason": "! prefix", "text": "!uptime"}},
+        {"ts": t - 4, "type": "shell_exec", "data": {
+            "command": "uptime", "output": " 14:23:07 up 42 days,  3:17,  2 users,  load average: 0.15, 0.22, 0.18",
+            "exit_code": 0, "handler": "cmd"}},
+        {"ts": t - 3, "type": "telegram_out", "data": {
+            "method": "sendMessage",
+            "payload": {"text": " 14:23:07 up 42 days,  3:17,  2 users,  load average: 0.15, 0.22, 0.18"},
+            "status": 200}},
+    ]
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -525,7 +1541,34 @@ def main():
                         help="Show complete event data (not truncated)")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable ANSI colors in streaming mode")
+    parser.add_argument("--demo", action="store_true",
+                        help="Load demo data without connecting to bot (for testing UI)")
     args = parser.parse_args()
+
+    if args.demo:
+        # Demo mode: no socket needed, inject sample events directly
+        print("Demo mode: loading sample events...", file=sys.stderr)
+        demo_events = _generate_demo_events()
+        # For --live, pass a dummy socket (won't be used for reading)
+        # We patch run_live to pre-load events
+        if args.live:
+            _run_live_demo(demo_events, args.filter_key, full=args.full)
+        else:
+            # Stream or raw: just print the events
+            for ev in demo_events:
+                etype = ev.get("type", "")
+                if not _matches_filter(etype, args.filter_key):
+                    continue
+                if args.raw:
+                    print(json.dumps(ev, ensure_ascii=False), flush=True)
+                else:
+                    ts = _ts(ev.get("ts", 0))
+                    label = _label(etype)
+                    formatter = _FORMATTERS.get(etype)
+                    details = formatter(ev.get("data", {})) if formatter else json.dumps(ev.get("data", {}), ensure_ascii=False)[:200]
+                    color = _ANSI.get(etype, "")
+                    print(f"{_DIM}{ts}{_RESET}  {color}{label}{_RESET}  {details}", flush=True)
+        return
 
     print(f"Connecting to {args.host}:{args.port}...", file=sys.stderr)
     try:
@@ -549,6 +1592,26 @@ def main():
     finally:
         sock.close()
         print("\nDisconnected.", file=sys.stderr)
+
+
+def _run_live_demo(demo_events: list[dict], filter_key: str | None, full: bool = False):
+    """Run --live TUI with pre-loaded demo events, no socket needed."""
+    import os, select, shutil, termios, tty
+
+    console = Console(highlight=False)
+
+    # Reuse run_live internals by creating a dummy socketpair
+    # The read end gets the demo events as JSON Lines, then EOF
+    rsock, wsock = socket.socketpair()
+    # Write all demo events
+    for ev in demo_events:
+        wsock.sendall((json.dumps(ev, ensure_ascii=False) + "\n").encode())
+    wsock.close()  # EOF after demo data
+
+    try:
+        run_live(rsock, filter_key, full=full)
+    finally:
+        rsock.close()
 
 
 if __name__ == "__main__":

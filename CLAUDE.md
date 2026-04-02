@@ -59,6 +59,7 @@ notify_server.py    — localhost:8765 HTTP server for outbound notifications
 send.py             — CLI helper to POST to notify server (stdlib only)
 debug_bus.py        — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
 debug.py            — CLI debug monitor (streaming / Rich full-screen TUI / raw JSON)
+DEBUG.md            — debug tool documentation (keyboard, mouse, search, architecture)
 config.json         — presets, timeouts, model/backend settings
 help.txt            — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt           — Telegram bot token (never commit)
@@ -87,7 +88,7 @@ python3 debug.py --raw | jq .     # pretty-print with jq
 
 Event types: `telegram_in`, `telegram_out`, `api_request`, `api_response`, `shell_exec`, `tool_call`, `route`.
 
-Note: `--live` mode replaces emoji with `◆` to avoid terminal width calculation mismatches across different terminal emulators (Windows Terminal, VS Code terminal, etc.).
+Full documentation (keyboard shortcuts, mouse support, search, architecture): see [DEBUG.md](DEBUG.md).
 
 **getUpdates transport:** uses POST + JSON body (not GET + query params). Telegram does not reliably parse `allowed_updates` when sent as repeated GET params.
 

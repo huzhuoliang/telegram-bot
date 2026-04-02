@@ -9,6 +9,7 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 - **Claude AI** — send `?<question>` (or any text) to get an AI response; Claude can also search and send photos/videos inline
 - **Preset replies** — configure fixed keyword → response pairs
 - **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically
+- **Debug monitor** — real-time TUI to inspect Telegram I/O, Claude API calls, shell commands, and routing (see [DEBUG.md](DEBUG.md))
 - **No public IP needed** — uses long-polling, no webhook required
 
 ## Prerequisites
