@@ -8,6 +8,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+import debug_bus
+
 logger = logging.getLogger(__name__)
 
 # Claude uses these markers in its response to trigger media actions.
@@ -65,11 +67,17 @@ def _run_cmd(cmd: str) -> str:
         output = (result.stdout + result.stderr).strip()
         if len(output) > _CMD_MAX_OUTPUT:
             output = output[:_CMD_MAX_OUTPUT] + f"\n…(truncated)"
-        return output or "(无输出)"
+        output = output or "(无输出)"
+        debug_bus.emit("shell_exec", {"command": cmd, "output": output, "exit_code": result.returncode, "handler": "cmd"})
+        return output
     except subprocess.TimeoutExpired:
-        return f"(命令超时，超过 {_CMD_TIMEOUT} 秒)"
+        output = f"(命令超时，超过 {_CMD_TIMEOUT} 秒)"
+        debug_bus.emit("shell_exec", {"command": cmd, "output": output, "exit_code": -1, "handler": "cmd"})
+        return output
     except Exception as e:
-        return f"(执行错误: {e})"
+        output = f"(执行错误: {e})"
+        debug_bus.emit("shell_exec", {"command": cmd, "output": output, "exit_code": -1, "handler": "cmd"})
+        return output
 
 
 def _run_privileged_cmd(cmd: str, timeout: int = 60) -> str:
@@ -82,11 +90,17 @@ def _run_privileged_cmd(cmd: str, timeout: int = 60) -> str:
         output = (result.stdout + result.stderr).strip()
         if len(output) > 4000:
             output = output[:4000] + "\n…(truncated)"
-        return f"exit {result.returncode}\n{output}" if output else f"exit {result.returncode} (no output)"
+        full = f"exit {result.returncode}\n{output}" if output else f"exit {result.returncode} (no output)"
+        debug_bus.emit("shell_exec", {"command": cmd, "output": full, "exit_code": result.returncode, "handler": "privileged"})
+        return full
     except subprocess.TimeoutExpired:
-        return f"(timeout after {timeout}s)"
+        output = f"(timeout after {timeout}s)"
+        debug_bus.emit("shell_exec", {"command": cmd, "output": output, "exit_code": -1, "handler": "privileged"})
+        return output
     except Exception as e:
-        return f"(error: {e})"
+        output = f"(error: {e})"
+        debug_bus.emit("shell_exec", {"command": cmd, "output": output, "exit_code": -1, "handler": "privileged"})
+        return output
 
 
 def _cmd_executable(cmd: str) -> str:
@@ -704,7 +718,15 @@ class ClaudeHandler:
             last_input_tokens = 0
             total_output_tokens = 0
 
-            for _ in range(self.max_rounds):
+            for _round in range(self.max_rounds):
+                debug_bus.emit("api_request", {
+                    "model": self.model,
+                    "max_tokens": self.max_tokens,
+                    "system": self._system_prompt,
+                    "messages": self._history,
+                    "tools": [t.get("name", "") for t in tools],
+                    "round": _round,
+                })
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
@@ -727,6 +749,13 @@ class ClaudeHandler:
                 if response.stop_reason != "tool_use" or not tool_calls:
                     # Final text response
                     raw = "\n".join(text_parts).strip()
+                    debug_bus.emit("api_response", {
+                        "stop_reason": response.stop_reason,
+                        "text": raw,
+                        "usage": {"input_tokens": last_input_tokens, "output_tokens": response.usage.output_tokens},
+                        "tool_calls": [],
+                        "round": _round,
+                    })
                     logger.info("Claude raw response (stop=%s): %s", response.stop_reason, raw[:500])
                     cleaned = self._execute_actions(_convert_md_tables(raw))
                     self._history.append({"role": "assistant", "content": response.content})
@@ -737,10 +766,18 @@ class ClaudeHandler:
                     return self._append_usage(cleaned or "已完成。", last_input_tokens, total_output_tokens)
 
                 # Execute tool calls and feed results back
+                debug_bus.emit("api_response", {
+                    "stop_reason": response.stop_reason,
+                    "text": "\n".join(text_parts).strip(),
+                    "usage": {"input_tokens": last_input_tokens, "output_tokens": response.usage.output_tokens},
+                    "tool_calls": [{"name": tc.name, "input": tc.input} for tc in tool_calls],
+                    "round": _round,
+                })
                 self._history.append({"role": "assistant", "content": response.content})
                 tool_results = []
                 for tc in tool_calls:
                     result = self._handle_tool_call(tc.name, tc.input)
+                    debug_bus.emit("tool_call", {"name": tc.name, "input": tc.input, "result": result})
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tc.id,

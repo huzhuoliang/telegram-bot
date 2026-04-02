@@ -57,6 +57,8 @@ handlers.py         — ShellHandler, ClaudeHandler (cli/api), PrivilegedClaudeH
                       PresetHandler, MediaArchiveHandler
 notify_server.py    — localhost:8765 HTTP server for outbound notifications
 send.py             — CLI helper to POST to notify server (stdlib only)
+debug_bus.py        — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
+debug.py            — CLI debug monitor (streaming / Rich full-screen TUI / raw JSON)
 config.json         — presets, timeouts, model/backend settings
 help.txt            — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt           — Telegram bot token (never commit)
@@ -64,7 +66,28 @@ CHAT_ID.txt         — authorized chat ID (never commit)
 telegram_bot.service — systemd unit
 ```
 
-**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
+**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
+
+## Debug monitor (debug_bus.py + debug.py)
+
+Bot emits structured events via `debug_bus.emit()` at key points (telegram in/out, API request/response, shell execution, tool calls, route decisions). A TCP server on `127.0.0.1:8766` streams events as JSON Lines to connected clients. Zero overhead when no client is connected.
+
+```bash
+python3 debug.py                  # streaming mode (default, scrollable)
+python3 debug.py --live           # full-screen TUI (Rich, Ctrl+C to quit)
+python3 debug.py --filter api     # only API request/response
+python3 debug.py --filter tg      # only Telegram in/out
+python3 debug.py --filter shell   # only shell commands
+python3 debug.py --filter tool    # only tool calls
+python3 debug.py --filter route   # only route decisions
+python3 debug.py --full           # show complete data (not truncated)
+python3 debug.py --raw            # raw JSON Lines (pipe-friendly)
+python3 debug.py --raw | jq .     # pretty-print with jq
+```
+
+Event types: `telegram_in`, `telegram_out`, `api_request`, `api_response`, `shell_exec`, `tool_call`, `route`.
+
+Note: `--live` mode replaces emoji with `◆` to avoid terminal width calculation mismatches across different terminal emulators (Windows Terminal, VS Code terminal, etc.).
 
 **getUpdates transport:** uses POST + JSON body (not GET + query params). Telegram does not reliably parse `allowed_updates` when sent as repeated GET params.
 
@@ -145,5 +168,6 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `privileged_claude_history_turns` | `6` | Rolling history window for privileged handler |
 | `privileged_claude_shell_timeout` | `60` | Shell command timeout for privileged handler |
 | `privileged_shell_whitelist` | `[]` | Commands that skip confirmation; suffix `*` = prefix match, exact otherwise |
+| `debug_port` | `8766` | Port for debug event TCP server |
 | `log_file` | (none) | Optional log file path; stdout only if omitted |
 | `log_level` | `"INFO"` | Logging level |

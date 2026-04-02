@@ -21,6 +21,7 @@ import sys
 import threading
 from pathlib import Path
 
+import debug_bus
 from handlers import ClaudeHandler, FileArchiveHandler, MediaArchiveHandler, PresetHandler, PrivilegedClaudeHandler, ShellHandler
 from notify_server import run_notify_server
 from router import Router
@@ -157,6 +158,9 @@ def main():
                     privileged_claude_handler=privileged_claude_handler,
                     config_path=args.config,
                     video_download_handler=video_download_handler)
+
+    # Start debug event server
+    debug_bus.start(port=config.get("debug_port", 8766), shutdown_event=_shutdown_event)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)

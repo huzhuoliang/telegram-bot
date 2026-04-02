@@ -2,6 +2,7 @@
 
 import logging
 import requests
+import debug_bus
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 MAX_MESSAGE_LEN = 4096
@@ -35,6 +36,7 @@ class TelegramClient:
                 payload["parse_mode"] = parse_mode
             try:
                 resp = self._session.post(self._url("sendMessage"), json=payload, timeout=10)
+                debug_bus.emit("telegram_out", {"method": "sendMessage", "payload": payload, "status": resp.status_code})
                 if resp.ok:
                     if first_id is None:
                         first_id = resp.json().get("result", {}).get("message_id")
@@ -84,6 +86,7 @@ class TelegramClient:
         payload = {"chat_id": self.chat_id}
         if caption:
             payload["caption"] = caption
+        debug_bus.emit("telegram_out", {"method": "sendPhoto", "payload": {"photo": photo, "caption": caption}})
         try:
             if photo.startswith("http://") or photo.startswith("https://"):
                 resp = self._session.post(
@@ -119,6 +122,7 @@ class TelegramClient:
         payload = {"chat_id": self.chat_id}
         if caption:
             payload["caption"] = caption
+        debug_bus.emit("telegram_out", {"method": "sendVideo", "payload": {"video": video, "caption": caption}})
         try:
             if video.startswith("http://") or video.startswith("https://"):
                 resp = self._session.post(
@@ -227,6 +231,7 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         try:
             resp = self._session.post(self._url("editMessageText"), json=payload, timeout=10)
+            debug_bus.emit("telegram_out", {"method": "editMessageText", "payload": payload, "status": resp.status_code})
             if resp.ok:
                 return True
             logger.warning("editMessageText failed: %s %s", resp.status_code, resp.text[:200])

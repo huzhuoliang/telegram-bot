@@ -1,6 +1,7 @@
 """Routes incoming Telegram messages to the appropriate handler."""
 
 import logging
+import debug_bus
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class Router:
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
+        debug_bus.emit("telegram_in", update)
 
         # Callback query (inline keyboard button click)
         callback_query = update.get("callback_query")
@@ -121,10 +123,12 @@ class Router:
 
         # !cmd → shell
         if text.startswith("!"):
+            debug_bus.emit("route", {"handler": "shell", "reason": "! prefix", "text": text[:80]})
             return self.shell.handle(text[1:].strip())
 
         # $cmd → privileged Claude
         if text.startswith("$") and self.privileged_claude:
+            debug_bus.emit("route", {"handler": "privileged_claude", "reason": "$ prefix", "text": text[:80]})
             if text.lower() == "$ctx":
                 return self.privileged_claude.context_stats()
             inner = text[1:].strip()
@@ -137,6 +141,7 @@ class Router:
 
         # ?question → Claude
         if text.startswith("?"):
+            debug_bus.emit("route", {"handler": "claude", "reason": "? prefix", "text": text[:80]})
             return self.claude.handle(text[1:].strip())
 
         # Preset match
@@ -145,4 +150,5 @@ class Router:
             return preset_reply
 
         # Default: forward to Claude
+        debug_bus.emit("route", {"handler": "claude", "reason": "default fallback", "text": text[:80]})
         return self.claude.handle(text)
