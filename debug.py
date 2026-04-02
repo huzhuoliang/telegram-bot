@@ -527,7 +527,7 @@ def _collapse_row(rows: list[_TreeRow], idx: int):
 def _sanitize_line(s: str) -> str:
     """Replace all control characters that would break single-line display."""
     import re
-    return re.sub(r'[\x00-\x1f\x7f\x85\x2028\x2029]+', ' ', s)
+    return re.sub(r'[\x00-\x1f\x7f\x85\u2028\u2029]+', ' ', s)
 
 
 def _value_preview(v, max_len: int = 120) -> str:
