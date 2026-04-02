@@ -112,8 +112,9 @@ class TelegramClient:
             logger.warning("sendPhoto exception: %s", e)
             return False
 
-    def send_video(self, video: str, caption: str = "") -> bool:
+    def send_video(self, video: str, caption: str = "", upload_timeout: int = 300) -> bool:
         """Send a video. `video` can be a local file path or an HTTP(S) URL.
+        upload_timeout: seconds to wait for the upload to complete (default 300s for large files).
         Never raises; returns True on success."""
         payload = {"chat_id": self.chat_id}
         if caption:
@@ -130,28 +131,36 @@ class TelegramClient:
                 logger.info("sendVideo URL failed (%s), trying download+upload fallback", resp.status_code)
                 try:
                     headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
-                    dl = self._session.get(video, timeout=60, headers=headers)
+                    dl = self._session.get(video, timeout=120, headers=headers)
                     dl.raise_for_status()
                     resp = self._session.post(
                         self._url("sendVideo"),
                         data=payload,
                         files={"video": ("video.mp4", dl.content, "video/mp4")},
-                        timeout=120,
+                        timeout=upload_timeout,
                     )
                     if not resp.ok:
-                        logger.warning("sendVideo upload fallback failed: %s", resp.status_code)
+                        logger.warning("sendVideo upload fallback failed: %s %s", resp.status_code, resp.text[:200])
                         return False
                     return True
                 except Exception as e:
                     logger.warning("sendVideo download fallback exception: %s", e)
                     return False
             else:
+                # Local file upload — use streaming to avoid loading whole file into memory
+                file_size = 0
+                try:
+                    import os
+                    file_size = os.path.getsize(video)
+                except OSError:
+                    pass
+                logger.info("sendVideo local file: %s (%.1f MB)", video, file_size / 1024 / 1024)
                 with open(video, "rb") as f:
                     resp = self._session.post(
                         self._url("sendVideo"),
                         data=payload,
                         files={"video": f},
-                        timeout=120,
+                        timeout=upload_timeout,
                     )
                 if not resp.ok:
                     logger.warning("sendVideo failed: %s %s", resp.status_code, resp.text[:200])
@@ -187,47 +196,38 @@ class TelegramClient:
             return False
 
     def send_message_with_keyboard(self, text: str, reply_markup: dict, parse_mode: str = "") -> int | None:
-        """Send a message with InlineKeyboardMarkup. Returns message_id or None."""
-        payload = {"chat_id": self.chat_id, "text": text, "reply_markup": reply_markup}
+        """Send a message with an inline keyboard. Returns message_id or None."""
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "reply_markup": reply_markup,
+        }
         if parse_mode:
             payload["parse_mode"] = parse_mode
         try:
             resp = self._session.post(self._url("sendMessage"), json=payload, timeout=10)
             if resp.ok:
                 return resp.json().get("result", {}).get("message_id")
-            logger.warning("sendMessage(keyboard) failed: %s %s", resp.status_code, resp.text[:200])
+            logger.warning("sendMessage (keyboard) failed: %s %s", resp.status_code, resp.text[:200])
         except Exception as e:
-            logger.warning("sendMessage(keyboard) exception: %s", e)
+            logger.warning("sendMessage (keyboard) exception: %s", e)
         return None
 
-    def edit_message(self, message_id: int, text: str, parse_mode: str = "") -> bool:
-        """Edit an existing message's text in-place. Returns True on success."""
-        if not text:
-            return False
-        payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text[:MAX_MESSAGE_LEN]}
+    def edit_message_text(self, message_id: int, text: str, parse_mode: str = "",
+                          reply_markup: dict = None) -> bool:
+        """Edit an existing message's text (and optionally its inline keyboard). Returns True on success."""
+        payload = {
+            "chat_id": self.chat_id,
+            "message_id": message_id,
+            "text": text[:MAX_MESSAGE_LEN],
+        }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         try:
             resp = self._session.post(self._url("editMessageText"), json=payload, timeout=10)
             if resp.ok:
-                return True
-            if "not modified" in resp.text:
-                return True
-            logger.debug("editMessageText failed: %s %s", resp.status_code, resp.text[:200])
-        except Exception as e:
-            logger.debug("editMessageText exception: %s", e)
-        return False
-
-    def edit_message_keyboard(self, message_id: int, text: str, reply_markup: dict, parse_mode: str = "") -> bool:
-        """Edit an existing message's text and keyboard in-place."""
-        payload = {"chat_id": self.chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        try:
-            resp = self._session.post(self._url("editMessageText"), json=payload, timeout=10)
-            if resp.ok:
-                return True
-            if "not modified" in resp.text:
                 return True
             logger.warning("editMessageText failed: %s %s", resp.status_code, resp.text[:200])
         except Exception as e:
@@ -235,7 +235,7 @@ class TelegramClient:
         return False
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
-        """Dismiss the loading spinner on an inline button. Must be called within 10s."""
+        """Answer a callback query (dismiss the loading spinner). Returns True on success."""
         payload = {"callback_query_id": callback_query_id}
         if text:
             payload["text"] = text
@@ -246,48 +246,27 @@ class TelegramClient:
             logger.warning("answerCallbackQuery exception: %s", e)
             return False
 
-    def send_by_file_id(self, media_type: str, file_id: str, caption: str = "") -> bool:
-        """Re-send an archived file by Telegram file_id (no re-upload). media_type: photo/video/document."""
-        method_map = {"photo": "sendPhoto", "video": "sendVideo", "document": "sendDocument"}
-        field_map = {"photo": "photo", "video": "video", "document": "document"}
-        method = method_map.get(media_type)
-        field = field_map.get(media_type)
-        if not method:
-            return False
-        payload = {"chat_id": self.chat_id, field: file_id}
-        if caption:
-            payload["caption"] = caption
-        try:
-            resp = self._session.post(self._url(method), json=payload, timeout=30)
-            if resp.ok:
-                return True
-            logger.warning("%s(file_id) failed: %s %s", method, resp.status_code, resp.text[:200])
-        except Exception as e:
-            logger.warning("%s(file_id) exception: %s", method, e)
-        return False
+    def call_api(self, method: str, **kwargs) -> dict:
+        """Generic API call. Raises on HTTP error."""
+        resp = self._session.post(self._url(method), json=kwargs, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_updates(self, offset: int, timeout: int = 30) -> list:
-        """Long-poll for new updates. Returns list of update dicts, [] on error."""
-        payload = {
-            "offset": offset,
-            "timeout": timeout,
-            "allowed_updates": ["message", "message_reaction", "callback_query"],
-        }
+        """Long-poll for updates. Returns a list of update dicts."""
         try:
             resp = self._session.post(
                 self._url("getUpdates"),
-                json=payload,
+                json={
+                    "offset": offset,
+                    "timeout": timeout,
+                    "allowed_updates": ["message", "edited_message", "callback_query", "message_reaction"],
+                },
                 timeout=(10, timeout + 5),  # connect=10s, read=timeout+5s
             )
             if resp.ok:
-                data = resp.json()
-                if data.get("ok"):
-                    return data.get("result", [])
-                logger.warning("getUpdates not ok: %s", data)
-            else:
-                logger.warning("getUpdates HTTP %s", resp.status_code)
-        except requests.exceptions.ReadTimeout:
-            pass  # normal long-poll timeout with no messages
+                return resp.json().get("result", [])
+            logger.warning("getUpdates failed: %s %s", resp.status_code, resp.text[:200])
         except Exception as e:
             logger.warning("getUpdates exception: %s", e)
         return []

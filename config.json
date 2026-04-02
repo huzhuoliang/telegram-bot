@@ -13,14 +13,18 @@
   "claude_backend": "api",
   "claude_model": "claude-sonnet-4-6",
   "claude_max_tokens": 4096,
-  "claude_history_turns": 6,
+  "claude_history_turns": 24,
   "claude_cli_timeout": 120,
   "claude_allowed_commands": [],
   "privileged_claude_model": "claude-sonnet-4-6",
   "privileged_claude_max_tokens": 4096,
-  "privileged_claude_history_turns": 6,
+  "privileged_claude_history_turns": 24,
+  "privileged_claude_max_rounds": 20,
   "privileged_claude_shell_timeout": 60,
   "privileged_shell_whitelist": [
     "df -h"
-  ]
+  ],
+  "video_download_dir": "~/video_downloads",
+  "video_download_cookies_bilibili": "",
+  "video_download_timeout": 600
 }

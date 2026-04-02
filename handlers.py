@@ -25,6 +25,36 @@ _LATEX_DOC_RE = re.compile(r'(\\documentclass[\s\S]*?\\end\{document\})')
 _CMD_TIMEOUT = 15  # seconds per tool command
 _CMD_MAX_OUTPUT = 2000  # chars
 
+# Matches <pre> blocks that have no language tag — used by _ensure_pre_language.
+_PRE_NO_LANG_RE = re.compile(r'<pre>(?!<code\s+class=)(.*?)</pre>', re.DOTALL)
+
+# Splits HTML into alternating plain-text / already-protected-block segments.
+# Odd-indexed segments are inside <code> or <pre> and must not be modified.
+_CODE_SPLIT_RE = re.compile(r'(<(?:code|pre)[^>]*>.*?</(?:code|pre)>)', re.DOTALL)
+# Absolute paths that Telegram would linkify as bot commands (e.g. /etc/nginx/nginx.conf).
+# Lookbehind excludes HTML closing tags (preceded by <), attributes (= or "), and existing paths.
+_ABS_PATH_RE = re.compile(r'(?<![="\'/\w<])/[a-zA-Z][/\w._-]{2,}')
+
+
+def _ensure_pre_language(text: str) -> str:
+    """Wrap bare <pre>…</pre> blocks with <code class="language-text"> so Telegram
+    always shows a language label.  Blocks that already have a language tag are left
+    untouched."""
+    def _wrap(m):
+        return f'<pre><code class="language-text">{m.group(1)}</code></pre>'
+    return _PRE_NO_LANG_RE.sub(_wrap, text)
+
+
+def _protect_file_paths(text: str) -> str:
+    """Wrap bare absolute file paths (e.g. /etc/nginx/nginx.conf) in <code> tags so
+    Telegram does not linkify them as bot commands.  Paths already inside <code>/<pre>
+    blocks are left untouched."""
+    parts = _CODE_SPLIT_RE.split(text)
+    for i, part in enumerate(parts):
+        if i % 2 == 0:  # plain-text segment
+            parts[i] = _ABS_PATH_RE.sub(lambda m: f'<code>{m.group()}</code>', part)
+    return ''.join(parts)
+
 
 def _run_cmd(cmd: str) -> str:
     """Execute a whitelisted command and return its output."""
@@ -72,6 +102,17 @@ _TABLE_ROW_RE = re.compile(r'^\s*\|')
 _TABLE_SEP_RE = re.compile(r'^\s*\|[\s|:-]+\|\s*$')
 
 
+def _str_display_width(s: str) -> int:
+    """Return display width of s in a monospace font: CJK wide/fullwidth chars count as 2."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in s)
+
+
+def _str_ljust(s: str, width: int) -> str:
+    """Left-justify s to display width using space padding."""
+    return s + ' ' * max(0, width - _str_display_width(s))
+
+
 def _convert_md_tables(text: str) -> str:
     """Convert Markdown pipe tables to <pre>-formatted aligned text for Telegram."""
     lines = text.split('\n')
@@ -96,11 +137,12 @@ def _convert_md_tables(text: str) -> str:
             # Normalize column count
             num_cols = max(len(r) for r in rows)
             rows = [r + [''] * (num_cols - len(r)) for r in rows]
-            col_widths = [max(len(r[c]) for r in rows) for c in range(num_cols)]
+            # Use display width (CJK = 2) so header/separator/data align correctly
+            col_widths = [max(_str_display_width(r[c]) for r in rows) for c in range(num_cols)]
             # Render
             formatted = []
             for j, row in enumerate(rows):
-                formatted.append('  '.join(cell.ljust(col_widths[ci]) for ci, cell in enumerate(row)).rstrip())
+                formatted.append('  '.join(_str_ljust(cell, col_widths[ci]) for ci, cell in enumerate(row)).rstrip())
                 if j == 0:
                     formatted.append('  '.join('-' * w for w in col_widths))
             result.append('<pre>' + '\n'.join(formatted) + '</pre>')
@@ -162,7 +204,7 @@ FORMATTING: Your response is sent via Telegram with parse_mode=HTML. Use HTML ta
 - <b>bold</b> for emphasis, headings, key terms
 - <i>italic</i> for secondary emphasis
 - <code>inline code</code> for commands, file paths, variable names, short code snippets
-- <pre>code block</pre> for multi-line code, shell output, config files
+- <pre><code class="language-xxx">code block</code></pre> for multi-line code, shell output, config files — ALWAYS specify the language (bash, python, json, yaml, text, etc.); use "text" when unsure
 - <u>underline</u> sparingly
 - Do NOT use Markdown syntax (no **, __, `, ``` etc.) — use HTML only.
 - Do NOT use Markdown pipe tables (|col|col|). For tabular data, use <pre> with space-aligned columns or a plain list.
@@ -264,6 +306,7 @@ class ClaudeHandler:
         model: str = "claude-sonnet-4-6",
         max_tokens: int = 1024,
         history_turns: int = 6,
+        max_rounds: int = 5,
         cli_timeout: int = 60,
         telegram_client=None,
         allowed_commands: list[str] = None,
@@ -272,6 +315,7 @@ class ClaudeHandler:
         self.model = model
         self.max_tokens = max_tokens
         self.history_turns = history_turns
+        self.max_rounds = max_rounds
         self.cli_timeout = cli_timeout
         self._telegram_client = telegram_client
         self._allowed_commands: list[str] = allowed_commands or []
@@ -282,17 +326,21 @@ class ClaudeHandler:
         self._session_input_tokens = 0
         self._session_output_tokens = 0
         self._compress_interactions = False  # subclasses may enable
+        self._intermediate_sent = False  # set True when any msg is sent between "处理中..." and final reply
 
     def _get_api_client(self):
         if self._api_client is None:
             import anthropic
-            self._api_client = anthropic.Anthropic()
+            self._api_client = anthropic.Anthropic(timeout=300.0)
         return self._api_client
 
     def _execute_actions(self, response: str) -> str:
         """Extract [PHOTO:] / [VIDEO:] / [LATEX:] markers, execute them, return cleaned text."""
         if not self._telegram_client:
             return response
+
+        response = _ensure_pre_language(response)
+        response = _protect_file_paths(response)
 
         # Handle LATEX markers (both [LATEX:...] and ```latex...``` code fences)
         def _run_latex(match):
@@ -656,7 +704,7 @@ class ClaudeHandler:
             last_input_tokens = 0
             total_output_tokens = 0
 
-            for _ in range(5):  # max 5 tool-call rounds
+            for _ in range(self.max_rounds):
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
@@ -721,6 +769,7 @@ class ClaudeHandler:
             return "用法：?<问题>"
         logger.info("Claude [%s]: %s", self.backend, text[:80])
         processing_msg_id = None
+        self._intermediate_sent = False
         if self._telegram_client:
             processing_msg_id = self._telegram_client.send_message("⏳ 处理中...")
         with self._lock:
@@ -738,8 +787,13 @@ class ClaudeHandler:
                 logger.warning("Claude error: %s", e)
                 reply = f"Claude 错误：{e}"
         if processing_msg_id and self._telegram_client:
-            # Edit the placeholder in-place rather than delete+send
-            if not self._telegram_client.edit_message(processing_msg_id, reply, "HTML"):
+            # If intermediate messages were sent (e.g. tool confirmations), "处理中..." is
+            # no longer at the bottom — delete it and send a fresh message so the reply
+            # appears after all intermediate messages.
+            if self._intermediate_sent:
+                self._telegram_client.delete_message(processing_msg_id)
+                self._telegram_client.send_message(reply, parse_mode="HTML")
+            elif not self._telegram_client.edit_message_text(processing_msg_id, reply, "HTML"):
                 self._telegram_client.delete_message(processing_msg_id)
                 self._telegram_client.send_message(reply, parse_mode="HTML")
             return None
@@ -752,6 +806,7 @@ class ClaudeHandler:
         import tempfile
         logger.info("Claude image [%s]: %s", self.backend, text[:80])
         processing_msg_id = None
+        self._intermediate_sent = False
         if self._telegram_client:
             processing_msg_id = self._telegram_client.send_message("⏳ 处理中...")
         tmp_path = None
@@ -775,7 +830,10 @@ class ClaudeHandler:
                 logger.warning("Claude image error: %s", e)
                 reply = f"Claude 错误：{e}"
         if processing_msg_id and self._telegram_client:
-            if not self._telegram_client.edit_message(processing_msg_id, reply, "HTML"):
+            if self._intermediate_sent:
+                self._telegram_client.delete_message(processing_msg_id)
+                self._telegram_client.send_message(reply, parse_mode="HTML")
+            elif not self._telegram_client.edit_message_text(processing_msg_id, reply, "HTML"):
                 self._telegram_client.delete_message(processing_msg_id)
                 self._telegram_client.send_message(reply, parse_mode="HTML")
             return None
@@ -1069,7 +1127,7 @@ class FileArchiveHandler:
             if len(parts) == 2 and parts[1] == "menu":
                 entries = self._load_index()
                 markup = self._main_menu_markup(entries)
-                self._client.edit_message_keyboard(message_id, "📁 归档文件", markup)
+                self._client.edit_message_text(message_id, "📁 归档文件", reply_markup=markup)
             elif len(parts) == 3:
                 media_type = parts[1]
                 try:
@@ -1087,7 +1145,15 @@ class FileArchiveHandler:
             entries = self._load_index()
             if 0 <= idx < len(entries) and entries[idx]["type"] == media_type:
                 entry = entries[idx]
-                ok = self._client.send_by_file_id(media_type, entry["file_id"])
+                _method = {"photo": "sendPhoto", "video": "sendVideo", "document": "sendDocument"}.get(media_type)
+                _field = {"photo": "photo", "video": "video", "document": "document"}.get(media_type)
+                ok = False
+                if _method and _field:
+                    try:
+                        self._client.call_api(_method, chat_id=self._client.chat_id, **{_field: entry["file_id"]})
+                        ok = True
+                    except Exception:
+                        pass
                 if not ok:
                     abs_path = str(self.archive_dir / entry["rel_path"])
                     if media_type == "photo":
@@ -1104,7 +1170,7 @@ class FileArchiveHandler:
 
         if total == 0:
             markup = {"inline_keyboard": [[{"text": "🔙 返回", "callback_data": "files:menu"}]]}
-            self._client.edit_message_keyboard(message_id, f"{label}\n暂无文件", markup)
+            self._client.edit_message_text(message_id, f"{label}\n暂无文件", reply_markup=markup)
             return
 
         total_pages = (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE
@@ -1126,7 +1192,7 @@ class FileArchiveHandler:
 
         text = f"{label} ({total})  第 {page + 1}/{total_pages} 页"
         markup = {"inline_keyboard": rows}
-        self._client.edit_message_keyboard(message_id, text, markup)
+        self._client.edit_message_text(message_id, text, reply_markup=markup)
 
 
 # ---------------------------------------------------------------------------
@@ -1140,7 +1206,7 @@ LANGUAGE: Always respond in Chinese (中文), unless the content is code, shell 
 FORMATTING: Responses are sent via Telegram with parse_mode=HTML. Use HTML tags:
 - <b>bold</b> for section headings and important notes
 - <code>inline code</code> for commands, file paths, variable names
-- <pre>block</pre> for shell output, file contents, multi-line code
+- <pre><code class="language-xxx">block</code></pre> for shell output, file contents, multi-line code — ALWAYS specify the language (bash, python, json, yaml, text, etc.); use "text" when unsure
 - Do NOT use Markdown syntax (no ** __ ` ``` etc.)
 - Keep responses concise — show what was done, then summarize.
 
@@ -1172,6 +1238,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
         model: str = "claude-sonnet-4-6",
         max_tokens: int = 4096,
         history_turns: int = 6,
+        max_rounds: int = 20,
         shell_timeout: int = 60,
         telegram_client=None,
         shell_whitelist: list[str] | None = None,
@@ -1182,6 +1249,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             model=model,
             max_tokens=max_tokens,
             history_turns=history_turns,
+            max_rounds=max_rounds,
             cli_timeout=120,
             telegram_client=telegram_client,
             allowed_commands=[],
@@ -1303,11 +1371,11 @@ class PrivilegedClaudeHandler(ClaudeHandler):
                 "reject":    "❌ 已拒绝",
             }
             label = labels.get(result, result)
-            self._telegram_client.edit_message_keyboard(
+            self._telegram_client.edit_message_text(
                 msg_id,
                 f"🔐 <b>请求执行命令：</b>\n\n<pre>{safe}</pre>\n\n{label}",
-                {"inline_keyboard": []},
                 parse_mode="HTML",
+                reply_markup={"inline_keyboard": []},
             )
 
         self.resolve_pending(result)
@@ -1319,8 +1387,9 @@ class PrivilegedClaudeHandler(ClaudeHandler):
             if self._telegram_client:
                 safe = cmd.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 self._telegram_client.send_message(
-                    f"⚡ 自动执行：<code>{safe}</code>", parse_mode="HTML"
+                    f"⚡ 自动执行：\n\n<pre>{safe}</pre>", parse_mode="HTML"
                 )
+                self._intermediate_sent = True
             logger.info("Privileged CMD (auto-approve): %s", cmd)
             return True, False
 
@@ -1345,6 +1414,7 @@ class PrivilegedClaudeHandler(ClaudeHandler):
                 {"text": "❌ 拒绝",       "callback_data": "priv:reject"},
             ]]}
             msg_id = self._telegram_client.send_message_with_keyboard(msg, markup, parse_mode="HTML")
+            self._intermediate_sent = True
             with self._pending_lock:
                 self._pending_msg_id = msg_id
 

@@ -25,6 +25,7 @@ from handlers import ClaudeHandler, FileArchiveHandler, MediaArchiveHandler, Pre
 from notify_server import run_notify_server
 from router import Router
 from telegram_client import TelegramClient
+from video_download_handler import VideoDownloadHandler
 
 BASE_DIR = Path(__file__).parent
 _shutdown_event = threading.Event()
@@ -128,6 +129,7 @@ def main():
         model=config.get("privileged_claude_model", config.get("claude_model", "claude-sonnet-4-6")),
         max_tokens=config.get("privileged_claude_max_tokens", 4096),
         history_turns=config.get("privileged_claude_history_turns", 6),
+        max_rounds=config.get("privileged_claude_max_rounds", 20),
         shell_timeout=config.get("privileged_claude_shell_timeout", 60),
         telegram_client=client,
         shell_whitelist=config.get("privileged_shell_whitelist", []),
@@ -142,11 +144,19 @@ def main():
         archive_dir=config.get("archive_dir", "~/telegram_archive"),
         telegram_client=client,
     )
+    video_download_handler = VideoDownloadHandler(
+        download_dir=config.get("video_download_dir", "~/video_downloads"),
+        cookies_bilibili=config.get("video_download_cookies_bilibili", ""),
+        proxy=config.get("proxy", ""),
+        timeout=config.get("video_download_timeout", 600),
+        telegram_client=client,
+    )
     router = Router(chat_id, shell_handler, claude_handler, preset_handler,
                     media_archive_handler=media_archive_handler,
                     file_archive_handler=file_archive_handler,
                     privileged_claude_handler=privileged_claude_handler,
-                    config_path=args.config)
+                    config_path=args.config,
+                    video_download_handler=video_download_handler)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)

@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 class Router:
     def __init__(self, chat_id: str, shell_handler, claude_handler, preset_handler,
                  media_archive_handler=None, file_archive_handler=None,
-                 privileged_claude_handler=None, config_path: str = None):
+                 privileged_claude_handler=None, config_path: str = None,
+                 video_download_handler=None):
         self.chat_id = str(chat_id).strip()
         self.shell = shell_handler
         self.claude = claude_handler
@@ -17,6 +18,7 @@ class Router:
         self.file_archive = file_archive_handler
         self.privileged_claude = privileged_claude_handler
         self.config_path = config_path
+        self.video_download = video_download_handler
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
@@ -105,6 +107,17 @@ class Router:
             if self.file_archive:
                 self.file_archive.handle_command()
             return None
+
+        # /dl <URL> → 视频下载
+        if text.lower().startswith("/dl ") and self.video_download:
+            url = text[4:].strip()
+            if not url:
+                return "用法：<code>/dl &lt;视频URL&gt;</code>\n支持 B站、抖音链接。"
+            # reply_fn：在后台线程中发送消息用
+            def reply_fn(msg: str):
+                self.video_download.client.send_message(msg, parse_mode="HTML")
+            self.video_download.handle(url, reply_fn)
+            return None  # 立即返回，后台线程负责后续回复
 
         # !cmd → shell
         if text.startswith("!"):
