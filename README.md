@@ -47,7 +47,7 @@ Send messages to your bot in Telegram:
 |---------|--------|
 | `!ls -la /tmp` | Runs shell command, returns stdout + stderr + exit code |
 | `?explain DNS` | Asks Claude, returns response in Chinese |
-| `搜索一张杨幂的照片` | Claude finds a photo and sends it to you |
+| `搜索一张XXX的照片` | Claude finds a photo and sends it to you |
 | `ping` | Returns `pong` (preset) |
 | `help` | Returns command reference (preset) |
 | `!clear` or `/clear` | Clears Claude conversation history |
