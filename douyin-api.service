@@ -1,0 +1,21 @@
+[Unit]
+Description=TikTokDownloader API (Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker rm -f douyin-api
+ExecStart=/usr/bin/docker run --rm --name douyin-api \
+    --network host \
+    -v /home/huzhuoliang/douyin_downloader/settings.json:/app/settings.json \
+    -v /home/huzhuoliang/douyin_downloader:/app/Volume \
+    -v /home/huzhuoliang/douyin_downloader/start.sh:/start.sh:ro \
+    ghcr.io/joeanamier/tiktok-downloader:latest \
+    sh /start.sh
+ExecStop=/usr/bin/docker stop douyin-api
+
+[Install]
+WantedBy=multi-user.target

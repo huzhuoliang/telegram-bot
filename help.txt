@@ -28,6 +28,12 @@
   <code>/setkey &lt;API_KEY&gt;</code> — 设置 Anthropic API key，切换到 api backend
   <code>/setcli</code> — 切回 <code>claude -p</code> backend
 
+<b>视频下载</b>
+  <code>/dl 链接</code> → 下载视频（支持抖音、B站等）
+  抖音：可直接粘贴分享文本，自动提取链接，无水印最高画质
+  B站：4K/HDR 优先，需 cookie 解锁大会员画质
+  &lt;50MB 自动上传，≥50MB 返回本地路径
+
 <b>媒体</b>
   发送图片/视频/文件 → 自动存档到服务器
   发送图片 + caption → Claude 识图（仅 api backend）

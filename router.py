@@ -112,7 +112,11 @@ class Router:
 
         # /dl <URL> → 视频下载
         if text.lower().startswith("/dl ") and self.video_download:
-            url = text[4:].strip()
+            import re
+            raw = text[4:].strip()
+            # Extract URL from text (Douyin share messages contain extra text around the link)
+            m = re.search(r'https?://[^\s<>"\']+', raw)
+            url = m.group(0) if m else raw.strip()
             if not url:
                 return "用法：<code>/dl &lt;视频URL&gt;</code>\n支持 B站、抖音链接。"
             # reply_fn：在后台线程中发送消息用

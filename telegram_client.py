@@ -115,13 +115,47 @@ class TelegramClient:
             logger.warning("sendPhoto exception: %s", e)
             return False
 
+    @staticmethod
+    def _probe_video(path: str) -> dict:
+        """Use ffprobe to get width, height, duration from a local video file."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json",
+                 "-show_streams", "-select_streams", "v:0", path],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                import json
+                streams = json.loads(result.stdout).get("streams", [])
+                if streams:
+                    s = streams[0]
+                    info = {}
+                    w = int(s.get("width", 0))
+                    h = int(s.get("height", 0))
+                    # Handle rotation (e.g. 90° rotated phone videos)
+                    rotation = int(s.get("tags", {}).get("rotate", 0))
+                    if rotation in (90, 270):
+                        w, h = h, w
+                    if w and h:
+                        info["width"] = w
+                        info["height"] = h
+                    dur = s.get("duration")
+                    if dur:
+                        info["duration"] = int(float(dur))
+                    return info
+        except Exception as e:
+            logger.debug("ffprobe failed for %s: %s", path, e)
+        return {}
+
     def send_video(self, video: str, caption: str = "", upload_timeout: int = 300) -> bool:
         """Send a video. `video` can be a local file path or an HTTP(S) URL.
         upload_timeout: seconds to wait for the upload to complete (default 300s for large files).
         Never raises; returns True on success."""
-        payload = {"chat_id": self.chat_id}
+        payload = {"chat_id": self.chat_id, "supports_streaming": True}
         if caption:
             payload["caption"] = caption
+            payload["parse_mode"] = "HTML"
         debug_bus.emit("telegram_out", {"method": "sendVideo", "payload": {"video": video, "caption": caption}})
         try:
             if video.startswith("http://") or video.startswith("https://"):
@@ -133,16 +167,27 @@ class TelegramClient:
                 if resp.ok:
                     return True
                 logger.info("sendVideo URL failed (%s), trying download+upload fallback", resp.status_code)
+                # Download to temp file so we can probe metadata
+                import tempfile
                 try:
                     headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
                     dl = self._session.get(video, timeout=120, headers=headers)
                     dl.raise_for_status()
-                    resp = self._session.post(
-                        self._url("sendVideo"),
-                        data=payload,
-                        files={"video": ("video.mp4", dl.content, "video/mp4")},
-                        timeout=upload_timeout,
-                    )
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                        tmp.write(dl.content)
+                        tmp_path = tmp.name
+                    probe = self._probe_video(tmp_path)
+                    if probe:
+                        payload.update(probe)
+                    with open(tmp_path, "rb") as f:
+                        resp = self._session.post(
+                            self._url("sendVideo"),
+                            data=payload,
+                            files={"video": ("video.mp4", f, "video/mp4")},
+                            timeout=upload_timeout,
+                        )
+                    import os
+                    os.unlink(tmp_path)
                     if not resp.ok:
                         logger.warning("sendVideo upload fallback failed: %s %s", resp.status_code, resp.text[:200])
                         return False
@@ -151,7 +196,7 @@ class TelegramClient:
                     logger.warning("sendVideo download fallback exception: %s", e)
                     return False
             else:
-                # Local file upload — use streaming to avoid loading whole file into memory
+                # Local file upload
                 file_size = 0
                 try:
                     import os
@@ -159,6 +204,11 @@ class TelegramClient:
                 except OSError:
                     pass
                 logger.info("sendVideo local file: %s (%.1f MB)", video, file_size / 1024 / 1024)
+                # Probe video metadata so Telegram mobile displays correct aspect ratio
+                probe = self._probe_video(video)
+                if probe:
+                    payload.update(probe)
+                    logger.info("sendVideo probe: %s", probe)
                 with open(video, "rb") as f:
                     resp = self._session.post(
                         self._url("sendVideo"),

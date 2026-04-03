@@ -52,9 +52,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 bot.py              — entry point: threads, signal handling, startup/shutdown
 telegram_client.py  — Telegram Bot API wrapper (long-poll, send/delete/edit message,
                       send photo/video with URL→download fallback, download file)
+                      sendVideo includes ffprobe metadata (width/height/duration)
+                      for correct mobile aspect ratio + supports_streaming
 router.py           — chat_id auth gate + message type dispatch
 handlers.py         — ShellHandler, ClaudeHandler (cli/api), PrivilegedClaudeHandler,
                       PresetHandler, MediaArchiveHandler
+video_download_handler.py — /dl command: Douyin via TikTokDownloader API (Docker),
+                      Bilibili/other via yt-dlp
+douyin_cookies.py   — Playwright headless Chromium → Douyin cookies (auto-refresh)
+douyin-api.service  — systemd unit for TikTokDownloader Docker container
 notify_server.py    — localhost:8765 HTTP server for outbound notifications
 send.py             — CLI helper to POST to notify server (stdlib only)
 debug_bus.py        — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
@@ -106,6 +112,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | `/ctx` | ClaudeHandler.context_stats() — context window breakdown (api only) |
 | `$ctx` | PrivilegedClaudeHandler.context_stats() — privileged context breakdown (api only) |
 | `$whitelist <list\|add\|remove>` | PrivilegedClaudeHandler.handle_whitelist_cmd() — manage shell whitelist |
+| `/dl <URL or share text>` | VideoDownloadHandler — Douyin (TikTokDownloader API), Bilibili/other (yt-dlp); auto-extracts URL from share text |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `$<text>` | PrivilegedClaudeHandler — runs in background thread; shell commands require user confirmation via reaction (👍 once / 📌 whitelist / 👎 reject); whitelisted commands skip confirmation |
 | `?<text>` | ClaudeHandler |
@@ -170,5 +177,27 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `privileged_claude_shell_timeout` | `60` | Shell command timeout for privileged handler |
 | `privileged_shell_whitelist` | `[]` | Commands that skip confirmation; suffix `*` = prefix match, exact otherwise |
 | `debug_port` | `8766` | Port for debug event TCP server |
+| `video_download_dir` | `"~/video_downloads"` | Directory for downloaded videos |
+| `video_download_cookies_bilibili` | `""` | Path to Bilibili cookies.txt |
+| `video_download_cookies_douyin` | `"~/douyin_cookies.txt"` | Path to Douyin cookies (auto-refreshed by Playwright) |
+| `video_download_timeout` | `600` | Download timeout in seconds |
 | `log_file` | (none) | Optional log file path; stdout only if omitted |
 | `log_level` | `"INFO"` | Logging level |
+
+## Douyin video download (TikTokDownloader)
+
+Douyin downloads use [TikTokDownloader](https://github.com/JoeanAmier/TikTokDownloader) running as a Docker container API service.
+
+**Service name: `douyin-api`**
+
+```bash
+sudo systemctl status douyin-api
+sudo systemctl restart douyin-api
+sudo journalctl -u douyin-api -f
+```
+
+- Docker image: `ghcr.io/joeanamier/tiktok-downloader:latest`
+- Network: `--network host` (shares host TUN proxy)
+- API endpoint: `http://127.0.0.1:5555/douyin/detail`
+- Config: `/home/huzhuoliang/douyin_downloader/settings.json`
+- Cookies: auto-refreshed via `douyin_cookies.py` (Playwright headless, 1 hour TTL)

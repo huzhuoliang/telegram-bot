@@ -2,18 +2,23 @@
 
 触发命令：/dl <URL>
 支持：
-  - Bilibili（B站）：4K/HDR 优先，需登录 cookie 才能解锁大会员画质
-  - 抖音（Douyin）：最高画质
+  - Bilibili（B站）：yt-dlp，4K/HDR 优先，需登录 cookie 才能解锁大会员画质
+  - 抖音（Douyin）：TikTokDownloader API（Docker 容器），无水印最高画质
+  - 其他：yt-dlp 通用下载
 下载完成后：
   - 文件 < 50MB：直接用 sendVideo 上传到 Telegram
   - 文件 >= 50MB：告知本地路径（不传输大文件）
 """
 
+import json
 import logging
 import os
 import re
 import subprocess
 import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -25,12 +30,23 @@ TELEGRAM_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 BILIBILI_PATTERN = re.compile(r"(bilibili\.com|b23\.tv)", re.IGNORECASE)
 DOUYIN_PATTERN = re.compile(r"(douyin\.com|v\.douyin\.com|iesdouyin\.com)", re.IGNORECASE)
 
+# 从各种抖音链接中提取视频 ID
+DOUYIN_ID_PATTERNS = [
+    re.compile(r"douyin\.com/(?:video|note|slides)/(\d{19})"),
+    re.compile(r"modal_id=(\d{19})"),
+    re.compile(r"\b(\d{19})\b"),
+]
+
 
 class VideoDownloadHandler:
+    DOUYIN_COOKIE_MAX_AGE = 3600  # 1 hour
+    DOUYIN_API_URL = "http://127.0.0.1:5555/douyin/detail"
+
     def __init__(
         self,
         download_dir: str = "~/video_downloads",
         cookies_bilibili: str = "",
+        cookies_douyin: str = "",
         proxy: str = "",
         timeout: int = 600,
         telegram_client=None,
@@ -38,9 +54,11 @@ class VideoDownloadHandler:
         self.download_dir = Path(download_dir).expanduser()
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.cookies_bilibili = cookies_bilibili
+        self.cookies_douyin = Path(cookies_douyin).expanduser() if cookies_douyin else Path("~/douyin_cookies.txt").expanduser()
         self.proxy = proxy
         self.timeout = timeout
         self.client = telegram_client
+        self._douyin_cookie_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -61,10 +79,154 @@ class VideoDownloadHandler:
 
     def _download_and_reply(self, url: str, reply_fn) -> None:
         try:
-            reply_fn("⏳ 正在获取视频信息，请稍候…")
-            cmd = self._build_command(url)
-            logger.info("yt-dlp command: %s", " ".join(cmd))
+            if DOUYIN_PATTERN.search(url):
+                self._download_douyin(url, reply_fn)
+            else:
+                self._download_ytdlp(url, reply_fn)
+        except Exception as e:
+            logger.exception("VideoDownloadHandler error: %s", e)
+            reply_fn(f"❌ 下载出错：{self._escape(str(e))}")
 
+    # ------------------------------------------------------------------
+    # 抖音：TikTokDownloader API
+    # ------------------------------------------------------------------
+
+    def _get_douyin_cookie_str(self) -> str:
+        """Get cookie string, refresh if stale."""
+        cookie_str_path = self.cookies_douyin.with_suffix(".str")
+        with self._douyin_cookie_lock:
+            if cookie_str_path.exists():
+                age = time.time() - cookie_str_path.stat().st_mtime
+                if age < self.DOUYIN_COOKIE_MAX_AGE:
+                    return cookie_str_path.read_text().strip()
+            try:
+                from douyin_cookies import refresh_cookies
+                cookie_str = refresh_cookies(self.cookies_douyin)
+                logger.info("Douyin cookies refreshed: %s", self.cookies_douyin)
+                return cookie_str
+            except Exception as e:
+                logger.warning("Failed to refresh douyin cookies: %s", e)
+                if cookie_str_path.exists():
+                    return cookie_str_path.read_text().strip()
+                return ""
+
+    def _resolve_douyin_id(self, url: str) -> str | None:
+        """Extract video ID from a Douyin URL. Resolves short links via redirect."""
+        for pat in DOUYIN_ID_PATTERNS:
+            m = pat.search(url)
+            if m:
+                return m.group(1)
+
+        # Short link (v.douyin.com) — follow redirect to get full URL
+        if "v.douyin.com" in url or "iesdouyin.com" in url:
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                req.add_header("User-Agent", "Mozilla/5.0")
+                resp = urllib.request.urlopen(req, timeout=10)
+                final_url = resp.url
+                for pat in DOUYIN_ID_PATTERNS:
+                    m = pat.search(final_url)
+                    if m:
+                        return m.group(1)
+            except Exception as e:
+                logger.warning("Failed to resolve short link %s: %s", url, e)
+        return None
+
+    def _download_douyin(self, url: str, reply_fn) -> None:
+        reply_fn("⏳ 正在解析抖音视频…")
+
+        # Step 1: Extract video ID
+        video_id = self._resolve_douyin_id(url)
+        if not video_id:
+            reply_fn("❌ 无法从链接中提取抖音视频 ID，请检查链接格式。")
+            return
+
+        # Step 2: Get cookie
+        cookie = self._get_douyin_cookie_str()
+
+        # Step 3: Call TikTokDownloader API
+        payload = json.dumps({
+            "detail_id": video_id,
+            "cookie": cookie,
+            "source": True,
+        }).encode()
+        req = urllib.request.Request(
+            self.DOUYIN_API_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            result = json.loads(resp.read().decode())
+        except (urllib.error.URLError, TimeoutError) as e:
+            reply_fn(f"❌ 无法连接抖音解析服务（TikTokDownloader API）：{self._escape(str(e))}")
+            return
+
+        data = result.get("data")
+        if not data:
+            msg = result.get("message", "未知错误")
+            reply_fn(f"❌ 解析失败：{self._escape(msg)}")
+            return
+
+        # Step 4: Extract best video URL
+        title = data.get("desc", "douyin_video")[:80]
+        video = data.get("video", {})
+        video_url = self._pick_best_douyin_url(video)
+        if not video_url:
+            reply_fn("❌ 获取到视频信息但无法提取下载地址。")
+            return
+
+        # Step 5: Download video file
+        reply_fn(f"⏳ 正在下载：{self._escape(title)}")
+        safe_title = re.sub(r'[\\/:*?"<>|]', '_', title).strip()
+        filepath = self.download_dir / f"{safe_title} [{video_id}].mp4"
+        try:
+            self._download_file(video_url, filepath)
+        except Exception as e:
+            reply_fn(f"❌ 视频文件下载失败：{self._escape(str(e))}")
+            return
+
+        self._deliver_video(filepath, reply_fn)
+
+    def _pick_best_douyin_url(self, video: dict) -> str | None:
+        """Pick the highest quality video URL from the API response."""
+        # Try bit_rate list (sorted by bitrate descending)
+        bit_rate = video.get("bit_rate", [])
+        if bit_rate:
+            bit_rate.sort(key=lambda x: x.get("bit_rate", 0), reverse=True)
+            for br in bit_rate:
+                urls = br.get("play_addr", {}).get("url_list", [])
+                if urls:
+                    return urls[0]
+        # Fallback to play_addr
+        urls = video.get("play_addr", {}).get("url_list", [])
+        if urls:
+            return urls[0]
+        return None
+
+    def _download_file(self, url: str, filepath: Path) -> None:
+        """Download a file from URL with proper headers."""
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        req.add_header("Referer", "https://www.douyin.com/")
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with open(filepath, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+    # ------------------------------------------------------------------
+    # yt-dlp (B站 / 通用)
+    # ------------------------------------------------------------------
+
+    def _download_ytdlp(self, url: str, reply_fn) -> None:
+        reply_fn("⏳ 正在获取视频信息，请稍候…")
+        cmd = self._build_ytdlp_command(url)
+        logger.info("yt-dlp command: %s", " ".join(cmd))
+
+        try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -72,48 +234,30 @@ class VideoDownloadHandler:
                 timeout=self.timeout,
                 cwd=str(self.download_dir),
             )
-
-            if result.returncode != 0:
-                err = (result.stderr or result.stdout or "未知错误")[-1500:]
-                reply_fn(f"❌ 下载失败：\n<pre><code class=\"language-text\">{self._escape(err)}</code></pre>")
-                return
-
-            # 从输出里找到下载的文件路径
-            filepath = self._find_downloaded_file(result.stdout + result.stderr)
-            if not filepath:
-                # 兜底：找最新文件
-                filepath = self._find_latest_file()
-
-            if not filepath or not filepath.exists():
-                reply_fn("❌ 下载完成但找不到输出文件，请检查下载目录。")
-                return
-
-            file_size = filepath.stat().st_size
-            size_mb = file_size / 1024 / 1024
-
-            if file_size <= TELEGRAM_UPLOAD_LIMIT:
-                reply_fn(f"✅ 下载完成（{size_mb:.1f} MB），正在上传…")
-                self._send_video(filepath, reply_fn)
-            else:
-                reply_fn(
-                    f"✅ 下载完成！\n"
-                    f"📦 大小：<b>{size_mb:.1f} MB</b>（超过 50MB，无法直接发送）\n"
-                    f"📂 本地路径：<code>{self._escape(str(filepath))}</code>"
-                )
-
         except subprocess.TimeoutExpired:
             reply_fn(f"❌ 下载超时（超过 {self.timeout // 60} 分钟）。")
-        except Exception as e:
-            logger.exception("VideoDownloadHandler error: %s", e)
-            reply_fn(f"❌ 下载出错：{self._escape(str(e))}")
+            return
 
-    def _build_command(self, url: str) -> list[str]:
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "未知错误")[-1500:]
+            reply_fn(f"❌ 下载失败：\n<pre><code class=\"language-text\">{self._escape(err)}</code></pre>")
+            return
+
+        filepath = self._find_downloaded_file(result.stdout + result.stderr)
+        if not filepath:
+            filepath = self._find_latest_file()
+
+        if not filepath or not filepath.exists():
+            reply_fn("❌ 下载完成但找不到输出文件，请检查下载目录。")
+            return
+
+        self._deliver_video(filepath, reply_fn)
+
+    def _build_ytdlp_command(self, url: str) -> list[str]:
         """根据 URL 类型构建 yt-dlp 命令。"""
         cmd = ["yt-dlp"]
 
         if BILIBILI_PATTERN.search(url):
-            # B站：优先 4K HDR > 4K > 1080P60 > 最佳
-            # 视频/音频分流，ffmpeg 合并为 mp4
             cmd += [
                 "-f", (
                     "bestvideo[height>=2160][ext=mp4]+bestaudio[ext=m4a]"
@@ -129,25 +273,41 @@ class VideoDownloadHandler:
                 cmd += ["--cookies", self.cookies_bilibili]
                 logger.info("Using bilibili cookies: %s", self.cookies_bilibili)
         else:
-            # 抖音 / 通用：最高画质
             cmd += [
                 "-f", "bestvideo+bestaudio/best",
                 "--merge-output-format", "mp4",
             ]
 
-        # 代理
         if self.proxy:
             cmd += ["--proxy", self.proxy]
 
-        # 输出模板
         cmd += [
             "-o", "%(title).80s [%(id)s].%(ext)s",
-            "--no-playlist",           # 不下整个播放列表，只下单个视频
-            "--no-part",               # 不留 .part 临时文件
-            "--print", "after_move:filepath",  # 打印最终路径（yt-dlp >= 2021.11）
+            "--no-playlist",
+            "--no-part",
+            "--print", "after_move:filepath",
             url,
         ]
         return cmd
+
+    # ------------------------------------------------------------------
+    # 通用：文件交付 + 辅助
+    # ------------------------------------------------------------------
+
+    def _deliver_video(self, filepath: Path, reply_fn) -> None:
+        """检查大小，上传或告知路径。"""
+        file_size = filepath.stat().st_size
+        size_mb = file_size / 1024 / 1024
+
+        if file_size <= TELEGRAM_UPLOAD_LIMIT:
+            reply_fn(f"✅ 下载完成（{size_mb:.1f} MB），正在上传…")
+            self._send_video(filepath, reply_fn)
+        else:
+            reply_fn(
+                f"✅ 下载完成！\n"
+                f"📦 大小：<b>{size_mb:.1f} MB</b>（超过 50MB，无法直接发送）\n"
+                f"📂 本地路径：<code>{self._escape(str(filepath))}</code>"
+            )
 
     def _find_downloaded_file(self, output: str) -> Path | None:
         """从 yt-dlp stdout 的 --print after_move:filepath 输出找文件路径。"""

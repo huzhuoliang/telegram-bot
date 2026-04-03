@@ -148,6 +148,7 @@ def main():
     video_download_handler = VideoDownloadHandler(
         download_dir=config.get("video_download_dir", "~/video_downloads"),
         cookies_bilibili=config.get("video_download_cookies_bilibili", ""),
+        cookies_douyin=config.get("video_download_cookies_douyin", ""),
         proxy=config.get("proxy", ""),
         timeout=config.get("video_download_timeout", 600),
         telegram_client=client,
