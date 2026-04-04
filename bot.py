@@ -22,11 +22,13 @@ import threading
 from pathlib import Path
 
 import debug_bus
-from handlers import ClaudeHandler, FileArchiveHandler, MediaArchiveHandler, PresetHandler, PrivilegedClaudeHandler, ShellHandler
+from handlers import (
+    ClaudeHandler, FileArchiveHandler, MediaArchiveHandler,
+    PresetHandler, PrivilegedClaudeHandler, ShellHandler, VideoDownloadHandler,
+)
 from notify_server import run_notify_server
 from router import Router
 from telegram_client import TelegramClient
-from video_download_handler import VideoDownloadHandler
 
 BASE_DIR = Path(__file__).parent
 _shutdown_event = threading.Event()

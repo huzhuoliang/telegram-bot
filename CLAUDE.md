@@ -49,28 +49,33 @@ ANTHROPIC_API_KEY=sk-ant-...
 ## Architecture
 
 ```
-bot.py              — entry point: threads, signal handling, startup/shutdown
-telegram_client.py  — Telegram Bot API wrapper (long-poll, send/delete/edit message,
-                      send photo/video with URL→download fallback, download file)
-                      sendVideo includes ffprobe metadata (width/height/duration)
-                      for correct mobile aspect ratio + supports_streaming
-router.py           — chat_id auth gate + message type dispatch
-handlers.py         — ShellHandler, ClaudeHandler (cli/api), PrivilegedClaudeHandler,
-                      PresetHandler, MediaArchiveHandler
-video_download_handler.py — /dl command: Douyin via TikTokDownloader API (Docker),
-                      Bilibili/other via yt-dlp
-douyin_cookies.py   — Playwright headless Chromium → Douyin cookies (auto-refresh)
-douyin-api.service  — systemd unit for TikTokDownloader Docker container
-notify_server.py    — localhost:8765 HTTP server for outbound notifications
-send.py             — CLI helper to POST to notify server (stdlib only)
-debug_bus.py        — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
-debug.py            — CLI debug monitor (streaming / Rich full-screen TUI / raw JSON)
-DEBUG.md            — debug tool documentation (keyboard, mouse, search, architecture)
-config.json         — presets, timeouts, model/backend settings
-help.txt            — /help command text (static sections; hot-reloaded on each /help)
-TOKEN.txt           — Telegram bot token (never commit)
-CHAT_ID.txt         — authorized chat ID (never commit)
-telegram_bot.service — systemd unit
+bot.py                — entry point: threads, signal handling, startup/shutdown
+telegram_client.py    — Telegram Bot API wrapper (long-poll, send/delete/edit message,
+                        send photo/video with URL→download fallback, download file)
+                        sendVideo includes ffprobe metadata (width/height/duration)
+                        for correct mobile aspect ratio + supports_streaming
+router.py             — chat_id auth gate + message type dispatch
+handlers/             — handler package (split from monolithic handlers.py)
+  __init__.py         — re-exports all handler classes
+  common.py           — shared regex patterns, utility functions, system prompts
+  shell.py            — ShellHandler (! prefix commands)
+  claude.py           — ClaudeHandler (cli/api backends, action markers, LaTeX)
+  privileged_claude.py — PrivilegedClaudeHandler ($ prefix, full shell/file access)
+  preset.py           — PresetHandler (keyword → response lookup)
+  media_archive.py    — MediaArchiveHandler + FileArchiveHandler
+  video_download.py   — VideoDownloadHandler (/dl command: Douyin API, yt-dlp)
+douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
+douyin-api.service    — systemd unit for TikTokDownloader Docker container
+notify_server.py      — localhost:8765 HTTP server for outbound notifications
+send.py               — CLI helper to POST to notify server (stdlib only)
+debug_bus.py          — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
+debug.py              — CLI debug monitor (streaming / Rich full-screen TUI / raw JSON)
+DEBUG.md              — debug tool documentation (keyboard, mouse, search, architecture)
+config.json           — presets, timeouts, model/backend settings
+help.txt              — /help command text (static sections; hot-reloaded on each /help)
+TOKEN.txt             — Telegram bot token (never commit)
+CHAT_ID.txt           — authorized chat ID (never commit)
+telegram_bot.service  — systemd unit
 ```
 
 **Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
@@ -121,7 +126,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 
 Special commands are checked before prefix dispatch to avoid `!clear` being treated as a shell command.
 
-## Claude backends (handlers.py)
+## Claude backends (handlers/claude.py)
 
 Controlled by `claude_backend` in `config.json`:
 
@@ -145,7 +150,7 @@ Claude can embed these in its response to trigger media delivery:
 
 For URLs that Telegram can't fetch directly (e.g. Wikipedia), `telegram_client` automatically downloads via local proxy and uploads as file.
 
-## Media archive (handlers.py `MediaArchiveHandler`)
+## Media archive (handlers/media_archive.py)
 
 Incoming photos/videos/documents are saved to `archive_dir`:
 ```

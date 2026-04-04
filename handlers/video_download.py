@@ -53,7 +53,7 @@ class VideoDownloadHandler:
     ):
         self.download_dir = Path(download_dir).expanduser()
         self.download_dir.mkdir(parents=True, exist_ok=True)
-        self.cookies_bilibili = cookies_bilibili
+        self.cookies_bilibili = str(Path(cookies_bilibili).expanduser()) if cookies_bilibili else ""
         self.cookies_douyin = Path(cookies_douyin).expanduser() if cookies_douyin else Path("~/douyin_cookies.txt").expanduser()
         self.proxy = proxy
         self.timeout = timeout
@@ -186,6 +186,7 @@ class VideoDownloadHandler:
             reply_fn(f"❌ 视频文件下载失败：{self._escape(str(e))}")
             return
 
+        filepath = self._transcode_av1(filepath, reply_fn)
         self._deliver_video(filepath, reply_fn)
 
     def _pick_best_douyin_url(self, video: dict) -> str | None:
@@ -251,6 +252,7 @@ class VideoDownloadHandler:
             reply_fn("❌ 下载完成但找不到输出文件，请检查下载目录。")
             return
 
+        filepath = self._transcode_av1(filepath, reply_fn)
         self._deliver_video(filepath, reply_fn)
 
     def _build_ytdlp_command(self, url: str) -> list[str]:
@@ -259,14 +261,7 @@ class VideoDownloadHandler:
 
         if BILIBILI_PATTERN.search(url):
             cmd += [
-                "-f", (
-                    "bestvideo[height>=2160][ext=mp4]+bestaudio[ext=m4a]"
-                    "/bestvideo[height>=2160]+bestaudio"
-                    "/bestvideo[height>=1080][fps>=60][ext=mp4]+bestaudio[ext=m4a]"
-                    "/bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]"
-                    "/bestvideo+bestaudio"
-                    "/best"
-                ),
+                "-f", "bestvideo+bestaudio/best",
                 "--merge-output-format", "mp4",
             ]
             if self.cookies_bilibili and Path(self.cookies_bilibili).exists():
@@ -285,10 +280,68 @@ class VideoDownloadHandler:
             "-o", "%(title).80s [%(id)s].%(ext)s",
             "--no-playlist",
             "--no-part",
+            "--force-overwrites",
             "--print", "after_move:filepath",
             url,
         ]
         return cmd
+
+    # ------------------------------------------------------------------
+    # AV1 → H.265 转码（iPhone Photos 兼容）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_video_codec(filepath: Path) -> str | None:
+        """Use ffprobe to get the video codec name."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                 str(filepath)],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.stdout.strip() if result.returncode == 0 else None
+        except Exception:
+            return None
+
+    def _transcode_av1(self, filepath: Path, reply_fn) -> Path:
+        """If video is AV1, transcode to H.265. Returns the (possibly new) path."""
+        codec = self._get_video_codec(filepath)
+        if codec != "av1":
+            return filepath
+
+        reply_fn("⏳ 检测到 AV1 编码，正在转码为 H.265（iPhone 兼容）…")
+        out = filepath.with_suffix(".h265.mp4")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(filepath),
+            "-c:v", "libx265", "-preset", "medium", "-crf", "23",
+            "-tag:v", "hvc1",  # Apple compatibility tag
+            "-c:a", "copy",
+            str(out),
+        ]
+        logger.info("Transcoding AV1 → H.265: %s", " ".join(cmd))
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.timeout,
+            )
+            if result.returncode == 0 and out.exists() and out.stat().st_size > 0:
+                filepath.unlink()
+                final = filepath  # reuse original name
+                out.rename(final)
+                logger.info("Transcode done: %s", final)
+                return final
+            else:
+                logger.warning("Transcode failed (rc=%d): %s", result.returncode, result.stderr[-500:])
+                reply_fn("⚠️ 转码失败，将发送 AV1 原始文件")
+                if out.exists():
+                    out.unlink()
+                return filepath
+        except subprocess.TimeoutExpired:
+            logger.warning("Transcode timed out")
+            reply_fn("⚠️ 转码超时，将发送 AV1 原始文件")
+            if out.exists():
+                out.unlink()
+            return filepath
 
     # ------------------------------------------------------------------
     # 通用：文件交付 + 辅助
