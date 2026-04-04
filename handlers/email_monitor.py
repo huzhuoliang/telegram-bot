@@ -492,7 +492,7 @@ class EmailMonitorHandler:
                     result = self._classify_and_summarize(parsed)
                     self._store_result(aid, result)
 
-                    if result["classification"] == "urgent":
+                    if result["classification"] == "urgent" and self._is_recent(parsed):
                         self._send_urgent_alert(result)
 
                 except Exception as e:
@@ -544,6 +544,24 @@ class EmailMonitorHandler:
             "body_preview": body,
             "has_attachments": has_attachments,
         }
+
+    @staticmethod
+    def _is_recent(parsed: dict, max_age_days: int = 3) -> bool:
+        """Check if email was sent within max_age_days. Defaults to True if unparseable."""
+        date_str = parsed.get("date", "")
+        if not date_str:
+            return True
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(date_str)
+            # Make comparison timezone-aware
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            age = now - dt
+            return age.total_seconds() < max_age_days * 86400
+        except Exception:
+            return True
 
     @staticmethod
     def _decode_header_value(value: str | None) -> str:
