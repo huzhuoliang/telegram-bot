@@ -64,6 +64,7 @@ handlers/             — handler package (split from monolithic handlers.py)
   preset.py           — PresetHandler (keyword → response lookup)
   media_archive.py    — MediaArchiveHandler + FileArchiveHandler
   video_download.py   — VideoDownloadHandler (/dl command: Douyin API, yt-dlp)
+  email_monitor.py    — EmailMonitorHandler (IMAP monitoring, AI classification, digest)
 douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
 douyin-api.service    — systemd unit for TikTokDownloader Docker container
 notify_server.py      — localhost:8765 HTTP server for outbound notifications
@@ -71,6 +72,8 @@ send.py               — CLI helper to POST to notify server (stdlib only)
 debug_bus.py          — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
 debug.py              — CLI debug monitor (streaming / Rich full-screen TUI / raw JSON)
 DEBUG.md              — debug tool documentation (keyboard, mouse, search, architecture)
+email_credentials.json — IMAP/SMTP account credentials (never commit)
+email_state.json      — processed email UIDs state (auto-generated, never commit)
 config.json           — presets, timeouts, model/backend settings
 help.txt              — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt             — Telegram bot token (never commit)
@@ -78,7 +81,7 @@ CHAT_ID.txt           — authorized chat ID (never commit)
 telegram_bot.service  — systemd unit
 ```
 
-**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
+**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. When email monitor is enabled, additional daemon threads run per-account IMAP monitoring and digest scheduling. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
 
 ## Debug monitor (debug_bus.py + debug.py)
 
@@ -118,6 +121,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | `$ctx` | PrivilegedClaudeHandler.context_stats() — privileged context breakdown (api only) |
 | `$whitelist <list\|add\|remove>` | PrivilegedClaudeHandler.handle_whitelist_cmd() — manage shell whitelist |
 | `/dl <URL or share text>` | VideoDownloadHandler — Douyin (TikTokDownloader API), Bilibili/other (yt-dlp); auto-extracts URL from share text |
+| `/email [subcommand]` | EmailMonitorHandler — status, digest, check, pause, resume, send |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `$<text>` | PrivilegedClaudeHandler — runs in background thread; shell commands require user confirmation via reaction (👍 once / 📌 whitelist / 👎 reject); whitelisted commands skip confirmation |
 | `?<text>` | ClaudeHandler |
@@ -186,8 +190,61 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `video_download_cookies_bilibili` | `""` | Path to Bilibili cookies.txt |
 | `video_download_cookies_douyin` | `"~/douyin_cookies.txt"` | Path to Douyin cookies (auto-refreshed by Playwright) |
 | `video_download_timeout` | `600` | Download timeout in seconds |
+| `email_enabled` | `false` | Enable email monitor |
+| `email_credentials_path` | `"email_credentials.json"` | Path to IMAP/SMTP credentials file |
+| `email_state_path` | `"email_state.json"` | Path to processed email state file |
+| `email_digest_interval_hours` | `6` | Hours between automatic digest reports |
+| `email_check_interval` | `30` | Seconds between IMAP polling checks |
+| `email_urgent_keywords` | `["urgent", ...]` | Keywords for urgent classification hints |
+| `email_claude_model` | `"claude-sonnet-4-6"` | Model for email classification/digest |
+| `email_claude_max_tokens` | `200` | Max tokens for per-email classification |
 | `log_file` | (none) | Optional log file path; stdout only if omitted |
 | `log_level` | `"INFO"` | Logging level |
+
+## Email monitor (handlers/email_monitor.py)
+
+IMAP-based email monitoring with AI-powered classification and summarization.
+
+**Features:**
+- IMAP polling (configurable interval, default 30s); IDLE supported for non-QQ providers (per-account `"idle": true/false`)
+- AI classification: each email classified as urgent/normal/spam via Claude API
+- Urgent emails trigger immediate Telegram alerts
+- Periodic AI-generated digest reports (natural language summary, not a raw list)
+- Send emails via SMTP (`/email send`)
+
+**Commands:**
+
+| Command | Action |
+|---|---|
+| `/email` | Show monitor status and statistics |
+| `/email digest` | Send digest report immediately |
+| `/email check` | Force-check all accounts now |
+| `/email pause` | Pause monitoring |
+| `/email resume` | Resume monitoring |
+| `/email send <to> <subject> <body>` | Send email (single or multi-line) |
+
+**Credentials file (`email_credentials.json`):**
+```json
+{
+  "accounts": [
+    {
+      "id": "qq",
+      "host": "imap.qq.com",
+      "port": 993,
+      "username": "user@qq.com",
+      "password": "imap-auth-code",
+      "folders": ["INBOX"],
+      "idle": false
+    }
+  ]
+}
+```
+
+SMTP host is auto-derived from IMAP host (`imap.` → `smtp.`, port 465 SSL). Override with `"smtp_host"` and `"smtp_port"` if needed.
+
+**State file (`email_state.json`):** auto-generated, tracks processed UIDs per account (rolling window of 500). Atomic writes via tmp+rename. New accounts process only the latest 20 emails on first run.
+
+**Known issue:** QQ Mail advertises IMAP IDLE capability but does not push notifications. Set `"idle": false` for QQ accounts.
 
 ## Douyin video download (TikTokDownloader)
 

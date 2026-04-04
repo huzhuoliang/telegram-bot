@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 .env
 .claude
+email_credentials.json
+email_state.json

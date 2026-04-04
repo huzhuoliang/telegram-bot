@@ -27,5 +27,13 @@
   "video_download_dir": "~/video_downloads",
   "video_download_cookies_bilibili": "~/claude-workspace/telegram_monitor/bilibili_cookie.txt",
   "video_download_cookies_douyin": "~/douyin_cookies.txt",
-  "video_download_timeout": 600
+  "video_download_timeout": 600,
+  "email_enabled": true,
+  "email_credentials_path": "email_credentials.json",
+  "email_state_path": "email_state.json",
+  "email_digest_interval_hours": 6,
+  "email_check_interval": 30,
+  "email_urgent_keywords": ["urgent", "emergency", "action required", "紧急", "重要"],
+  "email_claude_model": "claude-sonnet-4-6",
+  "email_claude_max_tokens": 200
 }

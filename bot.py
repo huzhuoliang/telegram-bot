@@ -23,7 +23,7 @@ from pathlib import Path
 
 import debug_bus
 from handlers import (
-    ClaudeHandler, FileArchiveHandler, MediaArchiveHandler,
+    ClaudeHandler, EmailMonitorHandler, FileArchiveHandler, MediaArchiveHandler,
     PresetHandler, PrivilegedClaudeHandler, ShellHandler, VideoDownloadHandler,
 )
 from notify_server import run_notify_server
@@ -155,12 +155,34 @@ def main():
         timeout=config.get("video_download_timeout", 600),
         telegram_client=client,
     )
+    # Email monitor (optional, disabled by default)
+    email_monitor_handler = None
+    if config.get("email_enabled", False):
+        creds_path = config.get("email_credentials_path", "email_credentials.json")
+        if not os.path.isabs(creds_path):
+            creds_path = str(BASE_DIR / creds_path)
+        state_path = config.get("email_state_path", "email_state.json")
+        if not os.path.isabs(state_path):
+            state_path = str(BASE_DIR / state_path)
+        email_monitor_handler = EmailMonitorHandler(
+            credentials_path=creds_path,
+            state_path=state_path,
+            telegram_client=client,
+            claude_model=config.get("email_claude_model", config.get("claude_model", "claude-sonnet-4-6")),
+            claude_max_tokens=config.get("email_claude_max_tokens", 200),
+            digest_interval_hours=config.get("email_digest_interval_hours", 6),
+            urgent_keywords=config.get("email_urgent_keywords"),
+            check_interval=config.get("email_check_interval", 60),
+            shutdown_event=_shutdown_event,
+        )
+
     router = Router(chat_id, shell_handler, claude_handler, preset_handler,
                     media_archive_handler=media_archive_handler,
                     file_archive_handler=file_archive_handler,
                     privileged_claude_handler=privileged_claude_handler,
                     config_path=args.config,
-                    video_download_handler=video_download_handler)
+                    video_download_handler=video_download_handler,
+                    email_monitor_handler=email_monitor_handler)
 
     # Start debug event server
     debug_bus.start(port=config.get("debug_port", 8766), shutdown_event=_shutdown_event)
@@ -183,6 +205,10 @@ def main():
 
     poll_thread.start()
     notify_thread.start()
+
+    # Start email monitor if enabled
+    if email_monitor_handler:
+        email_monitor_handler.start()
 
     logger.info("Bot started (chat_id=%s, notify_port=%d)", chat_id, config.get("notify_port", 8765))
     client.send_message("服务已启动。")

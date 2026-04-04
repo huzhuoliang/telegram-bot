@@ -10,7 +10,7 @@ class Router:
     def __init__(self, chat_id: str, shell_handler, claude_handler, preset_handler,
                  media_archive_handler=None, file_archive_handler=None,
                  privileged_claude_handler=None, config_path: str = None,
-                 video_download_handler=None):
+                 video_download_handler=None, email_monitor_handler=None):
         self.chat_id = str(chat_id).strip()
         self.shell = shell_handler
         self.claude = claude_handler
@@ -20,6 +20,7 @@ class Router:
         self.privileged_claude = privileged_claude_handler
         self.config_path = config_path
         self.video_download = video_download_handler
+        self.email_monitor = email_monitor_handler
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
@@ -109,6 +110,11 @@ class Router:
             if self.file_archive:
                 self.file_archive.handle_command()
             return None
+
+        # /email → email monitor commands
+        if text.lower().startswith("/email") and self.email_monitor:
+            subcommand = text[6:].strip()
+            return self.email_monitor.handle_command(subcommand)
 
         # /dl <URL> → 视频下载
         if text.lower().startswith("/dl ") and self.video_download:
