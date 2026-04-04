@@ -57,10 +57,15 @@ class ClaudeHandler:
         self._history: list[dict] = []
         self._lock = threading.Lock()
         self._api_client = None  # lazy-init only if backend == "api"
+        self._email_monitor = None  # EmailMonitorHandler reference for tool access
         self._session_input_tokens = 0
         self._session_output_tokens = 0
         self._compress_interactions = False  # subclasses may enable
         self._intermediate_sent = False  # set True when any msg is sent between "处理中..." and final reply
+
+    def set_email_monitor(self, handler):
+        """Set EmailMonitorHandler reference for email query tool."""
+        self._email_monitor = handler
 
     def _get_api_client(self):
         if self._api_client is None:
@@ -227,6 +232,42 @@ class ClaudeHandler:
                 },
             },
         ]
+        if self._email_monitor:
+            tools.append({
+                "name": "query_emails",
+                "description": (
+                    "Query the user's email inbox via IMAP. Can search all emails (not just recent ones). "
+                    "Use this when the user asks about their emails. "
+                    "Returns email subjects, senders, dates, and body previews."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["recent", "search"],
+                            "description": "'recent' for latest emails, 'search' to search by keyword/sender/date.",
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "Search keyword (IMAP subject/body search). For action='search'.",
+                        },
+                        "sender": {
+                            "type": "string",
+                            "description": "Filter by sender address or name. For action='search'.",
+                        },
+                        "days": {
+                            "type": "integer",
+                            "description": "Only return emails from last N days (default: no limit for search, 7 for recent).",
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "Max number of emails to return (default 10, max 30).",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            })
         if self._allowed_commands:
             tools.append({
                 "name": "run_command",
@@ -301,6 +342,17 @@ class ClaudeHandler:
                     except OSError:
                         pass
             return f"{len(png_pages)} page(s) sent successfully."
+
+        if tool_name == "query_emails":
+            if not self._email_monitor:
+                return "Error: email monitor not configured"
+            return self._email_monitor.query_emails(
+                action=tool_input.get("action", "recent"),
+                keyword=tool_input.get("keyword", ""),
+                sender=tool_input.get("sender", ""),
+                days=tool_input.get("days", 0),
+                count=min(tool_input.get("count", 10), 30),
+            )
 
         if tool_name == "run_command":
             cmd = tool_input.get("command", "")

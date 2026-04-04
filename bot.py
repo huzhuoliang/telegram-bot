@@ -176,6 +176,11 @@ def main():
             shutdown_event=_shutdown_event,
         )
 
+    # Connect email monitor to Claude handlers for tool access
+    if email_monitor_handler:
+        claude_handler.set_email_monitor(email_monitor_handler)
+        privileged_claude_handler.set_email_monitor(email_monitor_handler)
+
     router = Router(chat_id, shell_handler, claude_handler, preset_handler,
                     media_archive_handler=media_archive_handler,
                     file_archive_handler=file_archive_handler,

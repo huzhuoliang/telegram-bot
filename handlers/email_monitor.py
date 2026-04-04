@@ -98,6 +98,110 @@ class EmailMonitorHandler:
 
         logger.info("Email monitor started for %d account(s)", len(accounts))
 
+    # ── Email query for AI tool use ────────────────────────────────
+
+    def query_emails(self, action: str, keyword: str = "", sender: str = "",
+                     days: int = 0, count: int = 10) -> str:
+        """Query emails via IMAP. Called by Claude tool use."""
+        accounts = self._load_credentials()
+        if not accounts:
+            return "未配置邮箱账号。"
+
+        account = accounts[0]
+        try:
+            conn = self._connect_imap(account)
+        except Exception as e:
+            return f"IMAP 连接失败: {e}"
+
+        try:
+            # Build IMAP search criteria
+            criteria = []
+            if action == "search":
+                if keyword:
+                    criteria.append(f'SUBJECT "{keyword}"')
+                if sender:
+                    criteria.append(f'FROM "{sender}"')
+            if days > 0:
+                since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%d-%b-%Y")
+                criteria.append(f"SINCE {since}")
+            elif action == "recent" and not criteria:
+                since = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%d-%b-%Y")
+                criteria.append(f"SINCE {since}")
+
+            search_str = " ".join(criteria) if criteria else "ALL"
+            status, data = conn.uid("SEARCH", None, search_str)
+
+            if status != "OK" or not data[0]:
+                conn.logout()
+                return "未找到匹配的邮件。"
+
+            uids = data[0].split()
+            # Take the latest N
+            uids = uids[-count:]
+
+            results = []
+            for uid in reversed(uids):  # newest first
+                try:
+                    # Fetch headers + partial body (save bandwidth)
+                    status, msg_data = conn.uid("FETCH", uid, "(BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.2000>)")
+                    if status != "OK" or not msg_data:
+                        continue
+
+                    # Parse header and body from fetch response
+                    header_bytes = b""
+                    body_bytes = b""
+                    for part in msg_data:
+                        if isinstance(part, tuple):
+                            desc = part[0].decode(errors="replace").upper()
+                            if "HEADER" in desc:
+                                header_bytes = part[1]
+                            elif "TEXT" in desc:
+                                body_bytes = part[1]
+
+                    msg = email_lib.message_from_bytes(header_bytes)
+                    subject = self._decode_header_value(msg["Subject"]) or "(no subject)"
+                    from_addr = self._decode_header_value(msg["From"]) or "(unknown)"
+                    date_str = msg.get("Date", "")
+
+                    body_preview = body_bytes.decode(errors="replace")[:500].strip()
+                    # Strip HTML if present
+                    if "<" in body_preview:
+                        body_preview = self._strip_html(body_preview)
+                    body_preview = body_preview[:300]
+
+                    results.append(
+                        f"主题: {subject}\n"
+                        f"  发件人: {from_addr}\n"
+                        f"  日期: {date_str}\n"
+                        f"  内容预览: {body_preview}"
+                    )
+                except Exception:
+                    continue
+
+            conn.logout()
+
+            if not results:
+                return "未找到匹配的邮件。"
+
+            if action == "search":
+                parts = []
+                if keyword:
+                    parts.append(f"关键词 '{keyword}'")
+                if sender:
+                    parts.append(f"发件人 '{sender}'")
+                header = f"搜索 {' '.join(parts)} 结果: {len(results)} 封"
+            else:
+                header = f"最近 {len(results)} 封邮件"
+
+            return header + "\n\n" + "\n\n".join(results)
+
+        except Exception as e:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+            return f"查询失败: {e}"
+
     # ── Command dispatch (from /email ...) ───────────────────────
 
     def handle_command(self, subcommand: str) -> str | None:
