@@ -25,7 +25,7 @@
     "df -h"
   ],
   "video_download_dir": "~/video_downloads",
-  "video_download_cookies_bilibili": "",
+  "video_download_cookies_bilibili": "~/claude-workspace/telegram_monitor/bilibili_cookie.txt",
   "video_download_cookies_douyin": "~/douyin_cookies.txt",
   "video_download_timeout": 600
 }
