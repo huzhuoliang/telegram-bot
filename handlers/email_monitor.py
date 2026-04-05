@@ -289,6 +289,9 @@ class EmailMonitorHandler:
         return "\n".join(lines)
 
     def _cmd_digest(self) -> str | None:
+        with self._digest_lock:
+            if not self._pending_digest:
+                return "暂无待发邮件。"
         threading.Thread(target=self._send_digest, daemon=True).start()
         return "正在生成摘要..."
 
