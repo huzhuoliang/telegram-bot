@@ -836,19 +836,20 @@ class EmailMonitorHandler:
             self._shutdown_event.wait(timeout=interval_secs)
             if self._shutdown_event.is_set():
                 break
-            self._send_digest()
+            self._send_digest(manual=False)
 
-    def _send_digest(self):
+    def _send_digest(self, manual=True):
         with self._digest_lock:
             emails = list(self._pending_digest)
             self._pending_digest.clear()
 
         if not emails:
             logger.info("No emails for digest")
-            try:
-                self._client.send_message("暂无待发邮件。")
-            except Exception:
-                pass
+            if manual:
+                try:
+                    self._client.send_message("暂无待发邮件。")
+                except Exception:
+                    pass
             return
 
         # Build structured data for AI summarization
