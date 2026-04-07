@@ -190,6 +190,7 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `video_download_cookies_bilibili` | `""` | Path to Bilibili cookies.txt |
 | `video_download_cookies_douyin` | `"~/douyin_cookies.txt"` | Path to Douyin cookies (auto-refreshed by Playwright) |
 | `video_download_timeout` | `600` | Download timeout in seconds |
+| `video_download_transcode_threads` | `1` | CPU threads for AV1→H.265 transcoding (controls both ffmpeg and x265 engine) |
 | `email_enabled` | `false` | Enable email monitor |
 | `email_credentials_path` | `"email_credentials.json"` | Path to IMAP/SMTP credentials file |
 | `email_state_path` | `"email_state.json"` | Path to processed email state file |

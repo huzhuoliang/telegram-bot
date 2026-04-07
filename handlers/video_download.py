@@ -49,6 +49,7 @@ class VideoDownloadHandler:
         cookies_douyin: str = "",
         proxy: str = "",
         timeout: int = 600,
+        transcode_threads: int = 1,
         telegram_client=None,
     ):
         self.download_dir = Path(download_dir).expanduser()
@@ -57,6 +58,7 @@ class VideoDownloadHandler:
         self.cookies_douyin = Path(cookies_douyin).expanduser() if cookies_douyin else Path("~/douyin_cookies.txt").expanduser()
         self.proxy = proxy
         self.timeout = timeout
+        self.transcode_threads = str(transcode_threads)
         self.client = telegram_client
         self._douyin_cookie_lock = threading.Lock()
 
@@ -315,6 +317,8 @@ class VideoDownloadHandler:
         cmd = [
             "ffmpeg", "-y", "-i", str(filepath),
             "-c:v", "libx265", "-preset", "medium", "-crf", "23",
+            "-threads", self.transcode_threads,
+            "-x265-params", f"pools={self.transcode_threads}:frame-threads={self.transcode_threads}",
             "-tag:v", "hvc1",  # Apple compatibility tag
             "-c:a", "copy",
             str(out),

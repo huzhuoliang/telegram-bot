@@ -153,6 +153,7 @@ def main():
         cookies_douyin=config.get("video_download_cookies_douyin", ""),
         proxy=config.get("proxy", ""),
         timeout=config.get("video_download_timeout", 600),
+        transcode_threads=config.get("video_download_transcode_threads", 1),
         telegram_client=client,
     )
     # Email monitor (optional, disabled by default)
