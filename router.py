@@ -125,10 +125,11 @@ class Router:
             url = m.group(0) if m else raw.strip()
             if not url:
                 return "用法：<code>/dl &lt;视频URL&gt;</code>\n支持 B站、抖音链接。"
+            msg_id = message.get("message_id")
             # reply_fn：在后台线程中发送消息用
             def reply_fn(msg: str):
                 self.video_download.client.send_message(msg, parse_mode="HTML")
-            self.video_download.handle(url, reply_fn)
+            self.video_download.handle(url, reply_fn, reply_to_message_id=msg_id)
             return None  # 立即返回，后台线程负责后续回复
 
         # !cmd → shell

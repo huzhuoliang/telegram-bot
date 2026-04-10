@@ -61,16 +61,17 @@ class VideoDownloadHandler:
         self.transcode_threads = str(transcode_threads)
         self.client = telegram_client
         self._douyin_cookie_lock = threading.Lock()
+        self._bilibili_cookie_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 公共入口
     # ------------------------------------------------------------------
 
-    def handle(self, url: str, reply_fn) -> None:
+    def handle(self, url: str, reply_fn, reply_to_message_id: int | None = None) -> None:
         """异步下载：立刻返回，在后台线程执行，完成后通过 reply_fn / client 回复。"""
         t = threading.Thread(
             target=self._download_and_reply,
-            args=(url, reply_fn),
+            args=(url, reply_fn, reply_to_message_id),
             daemon=True,
         )
         t.start()
@@ -79,12 +80,12 @@ class VideoDownloadHandler:
     # 内部逻辑
     # ------------------------------------------------------------------
 
-    def _download_and_reply(self, url: str, reply_fn) -> None:
+    def _download_and_reply(self, url: str, reply_fn, reply_to_message_id: int | None = None) -> None:
         try:
             if DOUYIN_PATTERN.search(url):
-                self._download_douyin(url, reply_fn)
+                self._download_douyin(url, reply_fn, reply_to_message_id)
             else:
-                self._download_ytdlp(url, reply_fn)
+                self._download_ytdlp(url, reply_fn, reply_to_message_id)
         except Exception as e:
             logger.exception("VideoDownloadHandler error: %s", e)
             reply_fn(f"❌ 下载出错：{self._escape(str(e))}")
@@ -134,7 +135,7 @@ class VideoDownloadHandler:
                 logger.warning("Failed to resolve short link %s: %s", url, e)
         return None
 
-    def _download_douyin(self, url: str, reply_fn) -> None:
+    def _download_douyin(self, url: str, reply_fn, reply_to_message_id: int | None = None) -> None:
         reply_fn("⏳ 正在解析抖音视频…")
 
         # Step 1: Extract video ID
@@ -189,7 +190,7 @@ class VideoDownloadHandler:
             return
 
         filepath = self._transcode_av1(filepath, reply_fn)
-        self._deliver_video(filepath, reply_fn)
+        self._deliver_video(filepath, reply_fn, reply_to_message_id)
 
     def _pick_best_douyin_url(self, video: dict) -> str | None:
         """Pick the highest quality video URL from the API response."""
@@ -224,9 +225,51 @@ class VideoDownloadHandler:
     # yt-dlp (B站 / 通用)
     # ------------------------------------------------------------------
 
-    def _download_ytdlp(self, url: str, reply_fn) -> None:
-        reply_fn("⏳ 正在获取视频信息，请稍候…")
-        cmd = self._build_ytdlp_command(url)
+    def _ensure_bilibili_cookie(self, reply_fn) -> bool:
+        """Validate Bilibili cookie; trigger QR login if invalid.
+
+        Returns True if a valid VIP cookie is available after this call.
+        """
+        if not self.cookies_bilibili:
+            return False
+
+        from bilibili_cookies import check_cookie_valid, qr_login
+
+        if check_cookie_valid(self.cookies_bilibili):
+            return True
+
+        # Cookie invalid — try QR login (single attempt, guarded by lock)
+        acquired = self._bilibili_cookie_lock.acquire(blocking=False)
+        if not acquired:
+            # Another thread is already doing QR login; wait for it
+            reply_fn("⏳ 正在等待B站扫码登录完成…")
+            with self._bilibili_cookie_lock:
+                return check_cookie_valid(self.cookies_bilibili)
+
+        try:
+            def send_photo(path, caption):
+                if self.client:
+                    self.client.send_photo(path, caption=caption)
+                else:
+                    reply_fn(caption)
+
+            return qr_login(self.cookies_bilibili, send_photo, reply_fn)
+        finally:
+            self._bilibili_cookie_lock.release()
+
+    def _download_ytdlp(self, url: str, reply_fn, reply_to_message_id: int | None = None) -> None:
+        # For Bilibili: validate cookie before download
+        use_bilibili_cookie = False
+        if BILIBILI_PATTERN.search(url):
+            use_bilibili_cookie = self._ensure_bilibili_cookie(reply_fn)
+            if not use_bilibili_cookie:
+                reply_fn("⏳ 使用匿名模式下载（最高 1080P）…")
+            else:
+                reply_fn("⏳ 正在获取视频信息，请稍候…")
+        else:
+            reply_fn("⏳ 正在获取视频信息，请稍候…")
+
+        cmd = self._build_ytdlp_command(url, use_bilibili_cookie=use_bilibili_cookie)
         logger.info("yt-dlp command: %s", " ".join(cmd))
 
         try:
@@ -255,9 +298,9 @@ class VideoDownloadHandler:
             return
 
         filepath = self._transcode_av1(filepath, reply_fn)
-        self._deliver_video(filepath, reply_fn)
+        self._deliver_video(filepath, reply_fn, reply_to_message_id)
 
-    def _build_ytdlp_command(self, url: str) -> list[str]:
+    def _build_ytdlp_command(self, url: str, *, use_bilibili_cookie: bool = False) -> list[str]:
         """根据 URL 类型构建 yt-dlp 命令。"""
         cmd = ["yt-dlp"]
 
@@ -266,9 +309,11 @@ class VideoDownloadHandler:
                 "-f", "bestvideo+bestaudio/best",
                 "--merge-output-format", "mp4",
             ]
-            if self.cookies_bilibili and Path(self.cookies_bilibili).exists():
+            if use_bilibili_cookie and self.cookies_bilibili and Path(self.cookies_bilibili).exists():
                 cmd += ["--cookies", self.cookies_bilibili]
                 logger.info("Using bilibili cookies: %s", self.cookies_bilibili)
+            else:
+                logger.info("Bilibili download without cookies (anonymous mode)")
         else:
             cmd += [
                 "-f", "bestvideo+bestaudio/best",
@@ -306,6 +351,20 @@ class VideoDownloadHandler:
         except Exception:
             return None
 
+    @staticmethod
+    def _get_video_duration(filepath: Path) -> float:
+        """Use ffprobe to get video duration in seconds."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "format=duration", "-of", "csv=p=0",
+                 str(filepath)],
+                capture_output=True, text=True, timeout=10,
+            )
+            return float(result.stdout.strip()) if result.returncode == 0 else 0.0
+        except Exception:
+            return 0.0
+
     def _transcode_av1(self, filepath: Path, reply_fn) -> Path:
         """If video is AV1, transcode to H.265. Returns the (possibly new) path."""
         codec = self._get_video_codec(filepath)
@@ -313,6 +372,7 @@ class VideoDownloadHandler:
             return filepath
 
         reply_fn("⏳ 检测到 AV1 编码，正在转码为 H.265（iPhone 兼容）…")
+        duration = self._get_video_duration(filepath)
         out = filepath.with_suffix(".h265.mp4")
         cmd = [
             "ffmpeg", "-y", "-i", str(filepath),
@@ -321,28 +381,81 @@ class VideoDownloadHandler:
             "-x265-params", f"pools={self.transcode_threads}:frame-threads={self.transcode_threads}",
             "-tag:v", "hvc1",  # Apple compatibility tag
             "-c:a", "copy",
+            "-progress", "pipe:1",  # structured progress to stdout
             str(out),
         ]
         logger.info("Transcoding AV1 → H.265: %s", " ".join(cmd))
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.timeout,
-            )
-            if result.returncode == 0 and out.exists() and out.stat().st_size > 0:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # Drain stderr in background to prevent pipe deadlock
+            stderr_chunks: list[bytes] = []
+            def _drain_stderr():
+                for chunk in proc.stderr:
+                    stderr_chunks.append(chunk)
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
+            # Read progress from stdout
+            start_time = time.time()
+            progress_msg_id = None
+            last_update_time = 0.0
+            current_time_us = 0
+
+            for line in proc.stdout:
+                line = line.decode(errors="replace").strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        current_time_us = int(line.split("=", 1)[1])
+                    except ValueError:
+                        pass
+
+                    elapsed = time.time() - start_time
+                    if elapsed >= 60 and time.time() - last_update_time >= 60 and duration > 0:
+                        current_s = current_time_us / 1_000_000
+                        pct = min(current_s / duration * 100, 99.9)
+                        speed = current_s / elapsed if elapsed > 0 else 0
+                        if speed > 0:
+                            eta_min = (duration - current_s) / speed / 60
+                            eta_str = f"{eta_min:.0f} 分钟" if eta_min >= 1 else "不到 1 分钟"
+                        else:
+                            eta_str = "计算中"
+                        text = f"⏳ AV1→H.265 转码中 {pct:.1f}% | 速度 {speed:.2f}x | 预计还需 {eta_str}"
+                        try:
+                            if progress_msg_id is None and self.client:
+                                progress_msg_id = self.client.send_message(text)
+                            elif progress_msg_id and self.client:
+                                self.client.edit_message_text(progress_msg_id, text)
+                        except Exception as e:
+                            logger.warning("Progress message update failed: %s", e)
+                        last_update_time = time.time()
+
+            proc.wait()
+            stderr_thread.join(timeout=5)
+
+            # Clean up progress message
+            if progress_msg_id and self.client:
+                try:
+                    self.client.delete_message(progress_msg_id)
+                except Exception:
+                    pass
+
+            if proc.returncode == 0 and out.exists() and out.stat().st_size > 0:
                 filepath.unlink()
                 final = filepath  # reuse original name
                 out.rename(final)
                 logger.info("Transcode done: %s", final)
                 return final
             else:
-                logger.warning("Transcode failed (rc=%d): %s", result.returncode, result.stderr[-500:])
+                stderr_text = b"".join(stderr_chunks).decode(errors="replace")
+                logger.warning("Transcode failed (rc=%d): %s", proc.returncode, stderr_text[-500:])
                 reply_fn("⚠️ 转码失败，将发送 AV1 原始文件")
                 if out.exists():
                     out.unlink()
                 return filepath
-        except subprocess.TimeoutExpired:
-            logger.warning("Transcode timed out")
-            reply_fn("⚠️ 转码超时，将发送 AV1 原始文件")
+        except Exception as e:
+            logger.warning("Transcode error: %s", e)
+            reply_fn("⚠️ 转码出错，将发送 AV1 原始文件")
             if out.exists():
                 out.unlink()
             return filepath
@@ -351,14 +464,14 @@ class VideoDownloadHandler:
     # 通用：文件交付 + 辅助
     # ------------------------------------------------------------------
 
-    def _deliver_video(self, filepath: Path, reply_fn) -> None:
+    def _deliver_video(self, filepath: Path, reply_fn, reply_to_message_id: int | None = None) -> None:
         """检查大小，上传或告知路径。"""
         file_size = filepath.stat().st_size
         size_mb = file_size / 1024 / 1024
 
         if file_size <= TELEGRAM_UPLOAD_LIMIT:
             reply_fn(f"✅ 下载完成（{size_mb:.1f} MB），正在上传…")
-            self._send_video(filepath, reply_fn)
+            self._send_video(filepath, reply_fn, reply_to_message_id)
         else:
             reply_fn(
                 f"✅ 下载完成！\n"
@@ -389,13 +502,17 @@ class VideoDownloadHandler:
             return None
         return max(files, key=lambda f: f.stat().st_mtime)
 
-    def _send_video(self, filepath: Path, reply_fn) -> None:
+    def _send_video(self, filepath: Path, reply_fn, reply_to_message_id: int | None = None) -> None:
         """通过 TelegramClient 发送视频文件。"""
         if not self.client:
             reply_fn(f"⚠️ 无法上传（未配置 TelegramClient）\n📂 路径：<code>{self._escape(str(filepath))}</code>")
             return
         try:
-            self.client.send_video(str(filepath), caption=f"🎬 {self._escape(filepath.stem)}")
+            self.client.send_video(
+                str(filepath),
+                caption=f"🎬 {self._escape(filepath.stem)}",
+                reply_to_message_id=reply_to_message_id,
+            )
         except Exception as e:
             logger.exception("send_video failed: %s", e)
             reply_fn(

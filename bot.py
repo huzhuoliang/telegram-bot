@@ -216,6 +216,12 @@ def main():
     if email_monitor_handler:
         email_monitor_handler.start()
 
+    # Start Bilibili cookie auto-refresh scheduler
+    bilibili_cookie_path = config.get("video_download_cookies_bilibili", "")
+    if bilibili_cookie_path:
+        from bilibili_cookies import start_refresh_scheduler
+        start_refresh_scheduler(bilibili_cookie_path)
+
     logger.info("Bot started (chat_id=%s, notify_port=%d)", chat_id, config.get("notify_port", 8765))
     client.send_message("服务已启动。")
 

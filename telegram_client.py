@@ -22,7 +22,7 @@ class TelegramClient:
     def _url(self, method: str) -> str:
         return TELEGRAM_API.format(token=self.token, method=method)
 
-    def send_message(self, text: str, parse_mode: str = "") -> int | None:
+    def send_message(self, text: str, parse_mode: str = "", reply_to_message_id: int | None = None) -> int | None:
         """Send text to the configured chat. Splits messages > 4096 chars.
         Returns the message_id of the first chunk on success, None on failure."""
         if not text:
@@ -34,6 +34,9 @@ class TelegramClient:
             payload = {"chat_id": self.chat_id, "text": chunk}
             if parse_mode:
                 payload["parse_mode"] = parse_mode
+            if reply_to_message_id:
+                payload["reply_to_message_id"] = reply_to_message_id
+                reply_to_message_id = None  # only reply on first chunk
             try:
                 resp = self._session.post(self._url("sendMessage"), json=payload, timeout=10)
                 debug_bus.emit("telegram_out", {"method": "sendMessage", "payload": payload, "status": resp.status_code})
@@ -148,11 +151,14 @@ class TelegramClient:
             logger.debug("ffprobe failed for %s: %s", path, e)
         return {}
 
-    def send_video(self, video: str, caption: str = "", upload_timeout: int = 300) -> bool:
+    def send_video(self, video: str, caption: str = "", upload_timeout: int = 300,
+                   reply_to_message_id: int | None = None) -> bool:
         """Send a video. `video` can be a local file path or an HTTP(S) URL.
         upload_timeout: seconds to wait for the upload to complete (default 300s for large files).
         Never raises; returns True on success."""
         payload = {"chat_id": self.chat_id, "supports_streaming": True}
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
         if caption:
             payload["caption"] = caption
             payload["parse_mode"] = "HTML"

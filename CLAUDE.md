@@ -52,6 +52,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 bot.py                — entry point: threads, signal handling, startup/shutdown
 telegram_client.py    — Telegram Bot API wrapper (long-poll, send/delete/edit message,
                         send photo/video with URL→download fallback, download file)
+                        sendMessage/sendVideo support reply_to_message_id
                         sendVideo includes ffprobe metadata (width/height/duration)
                         for correct mobile aspect ratio + supports_streaming
 router.py             — chat_id auth gate + message type dispatch
@@ -63,8 +64,10 @@ handlers/             — handler package (split from monolithic handlers.py)
   privileged_claude.py — PrivilegedClaudeHandler ($ prefix, full shell/file access)
   preset.py           — PresetHandler (keyword → response lookup)
   media_archive.py    — MediaArchiveHandler + FileArchiveHandler
-  video_download.py   — VideoDownloadHandler (/dl command: Douyin API, yt-dlp)
+  video_download.py   — VideoDownloadHandler (/dl command: Douyin API, yt-dlp,
+                        AV1→H.265 transcode with live progress, reply-to-message)
   email_monitor.py    — EmailMonitorHandler (IMAP monitoring, AI classification, digest)
+bilibili_cookies.py   — Bilibili cookie validation + QR-code login + daily auto-refresh
 douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
 douyin-api.service    — systemd unit for TikTokDownloader Docker container
 notify_server.py      — localhost:8765 HTTP server for outbound notifications
@@ -120,7 +123,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | `/ctx` | ClaudeHandler.context_stats() — context window breakdown (api only) |
 | `$ctx` | PrivilegedClaudeHandler.context_stats() — privileged context breakdown (api only) |
 | `$whitelist <list\|add\|remove>` | PrivilegedClaudeHandler.handle_whitelist_cmd() — manage shell whitelist |
-| `/dl <URL or share text>` | VideoDownloadHandler — Douyin (TikTokDownloader API), Bilibili/other (yt-dlp); auto-extracts URL from share text |
+| `/dl <URL or share text>` | VideoDownloadHandler — Douyin (TikTokDownloader API), Bilibili/other (yt-dlp); auto-extracts URL from share text; Bilibili auto-validates cookie and triggers QR login if expired |
 | `/email [subcommand]` | EmailMonitorHandler — status, digest, check, pause, resume, send |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `$<text>` | PrivilegedClaudeHandler — runs in background thread; shell commands require user confirmation via reaction (👍 once / 📌 whitelist / 👎 reject); whitelisted commands skip confirmation |
@@ -187,7 +190,7 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `privileged_shell_whitelist` | `[]` | Commands that skip confirmation; suffix `*` = prefix match, exact otherwise |
 | `debug_port` | `8766` | Port for debug event TCP server |
 | `video_download_dir` | `"~/video_downloads"` | Directory for downloaded videos |
-| `video_download_cookies_bilibili` | `""` | Path to Bilibili cookies.txt |
+| `video_download_cookies_bilibili` | `""` | Path to Bilibili cookies.txt (auto-refreshed via QR login) |
 | `video_download_cookies_douyin` | `"~/douyin_cookies.txt"` | Path to Douyin cookies (auto-refreshed by Playwright) |
 | `video_download_timeout` | `600` | Download timeout in seconds |
 | `video_download_transcode_threads` | `1` | CPU threads for AV1→H.265 transcoding (controls both ffmpeg and x265 engine) |
