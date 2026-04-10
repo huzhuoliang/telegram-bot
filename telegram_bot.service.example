@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=huzhuoliang
+User=YOUR_USER
 EnvironmentFile=/etc/telegram-bot/project.env
 ExecStart=/bin/sh -c 'cd ${PROJECT_DIR} && exec /usr/bin/python3 bot.py'
 Restart=on-failure
