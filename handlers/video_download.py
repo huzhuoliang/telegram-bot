@@ -6,8 +6,9 @@
   - 抖音（Douyin）：TikTokDownloader API（Docker 容器），无水印最高画质
   - 其他：yt-dlp 通用下载
 下载完成后：
-  - 文件 < 50MB：直接用 sendVideo 上传到 Telegram
-  - 文件 >= 50MB：告知本地路径（不传输大文件）
+  - 文件 <= 上传限制：直接用 sendVideo 上传到 Telegram
+  - 文件超过限制：告知本地路径
+上传限制默认 50MB（Telegram Bot API 云端），使用 Local Bot API Server 可提升至 2000MB。
 """
 
 import json
@@ -22,9 +23,6 @@ import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-# Telegram Bot API 上传限制（字节）
-TELEGRAM_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 
 # 支持的域名特征
 BILIBILI_PATTERN = re.compile(r"(bilibili\.com|b23\.tv)", re.IGNORECASE)
@@ -44,22 +42,24 @@ class VideoDownloadHandler:
 
     def __init__(
         self,
-        download_dir: str = "~/video_downloads",
+        download_dir: str = "video_downloads",
         cookies_bilibili: str = "",
         cookies_douyin: str = "",
         proxy: str = "",
         timeout: int = 600,
         transcode_threads: int = 1,
         telegram_client=None,
+        upload_limit_mb: int = 50,
     ):
         self.download_dir = Path(download_dir).expanduser()
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.cookies_bilibili = str(Path(cookies_bilibili).expanduser()) if cookies_bilibili else ""
-        self.cookies_douyin = Path(cookies_douyin).expanduser() if cookies_douyin else Path("~/douyin_cookies.txt").expanduser()
+        self.cookies_douyin = Path(cookies_douyin).expanduser() if cookies_douyin else Path(__file__).parent.parent / "douyin_cookies.txt"
         self.proxy = proxy
         self.timeout = timeout
         self.transcode_threads = str(transcode_threads)
         self.client = telegram_client
+        self.upload_limit = upload_limit_mb * 1024 * 1024
         self._douyin_cookie_lock = threading.Lock()
         self._bilibili_cookie_lock = threading.Lock()
 
@@ -469,13 +469,14 @@ class VideoDownloadHandler:
         file_size = filepath.stat().st_size
         size_mb = file_size / 1024 / 1024
 
-        if file_size <= TELEGRAM_UPLOAD_LIMIT:
+        if file_size <= self.upload_limit:
             reply_fn(f"✅ 下载完成（{size_mb:.1f} MB），正在上传…")
             self._send_video(filepath, reply_fn, reply_to_message_id)
         else:
+            limit_mb = self.upload_limit / 1024 / 1024
             reply_fn(
                 f"✅ 下载完成！\n"
-                f"📦 大小：<b>{size_mb:.1f} MB</b>（超过 50MB，无法直接发送）\n"
+                f"📦 大小：<b>{size_mb:.1f} MB</b>（超过 {limit_mb:.0f}MB 上传限制）\n"
                 f"📂 本地路径：<code>{self._escape(str(filepath))}</code>"
             )
 

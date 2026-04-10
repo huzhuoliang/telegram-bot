@@ -4,23 +4,28 @@ import logging
 import requests
 import debug_bus
 
-TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
+DEFAULT_API_BASE = "https://api.telegram.org"
 MAX_MESSAGE_LEN = 4096
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramClient:
-    def __init__(self, token: str, chat_id: str, proxy: str = ""):
+    def __init__(self, token: str, chat_id: str, proxy: str = "",
+                 api_base: str = "", local_mode: bool = False):
         self.token = token.strip()
         self.chat_id = str(chat_id).strip()
+        self.api_base = api_base.rstrip("/") if api_base else DEFAULT_API_BASE
+        self.local_mode = local_mode
         self._session = requests.Session()
         if proxy:
             self._session.proxies = {"http": proxy, "https": proxy}
             logger.info("Using proxy: %s", proxy)
+        if api_base:
+            logger.info("Using local Bot API: %s (local_mode=%s)", self.api_base, local_mode)
 
     def _url(self, method: str) -> str:
-        return TELEGRAM_API.format(token=self.token, method=method)
+        return f"{self.api_base}/bot{self.token}/{method}"
 
     def send_message(self, text: str, parse_mode: str = "", reply_to_message_id: int | None = None) -> int | None:
         """Send text to the configured chat. Splits messages > 4096 chars.
@@ -203,9 +208,9 @@ class TelegramClient:
                     return False
             else:
                 # Local file upload
+                import os
                 file_size = 0
                 try:
-                    import os
                     file_size = os.path.getsize(video)
                 except OSError:
                     pass
@@ -215,13 +220,23 @@ class TelegramClient:
                 if probe:
                     payload.update(probe)
                     logger.info("sendVideo probe: %s", probe)
-                with open(video, "rb") as f:
+
+                if self.local_mode:
+                    # Local Bot API server: pass file path directly, no HTTP upload
+                    abs_path = os.path.abspath(video)
                     resp = self._session.post(
                         self._url("sendVideo"),
-                        data=payload,
-                        files={"video": f},
+                        json={**payload, "video": f"file://{abs_path}"},
                         timeout=upload_timeout,
                     )
+                else:
+                    with open(video, "rb") as f:
+                        resp = self._session.post(
+                            self._url("sendVideo"),
+                            data=payload,
+                            files={"video": f},
+                            timeout=upload_timeout,
+                        )
                 if not resp.ok:
                     logger.warning("sendVideo failed: %s %s", resp.status_code, resp.text[:200])
                     return False
@@ -243,7 +258,7 @@ class TelegramClient:
                 logger.warning("getFile failed: %s", resp.text[:200])
                 return False
             file_path = resp.json()["result"]["file_path"]
-            download_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+            download_url = f"{self.api_base}/file/bot{self.token}/{file_path}"
             dl = self._session.get(download_url, timeout=60)
             dl.raise_for_status()
             import os

@@ -9,3 +9,10 @@ __pycache__/
 .claude
 email_credentials.json
 email_state.json
+telegram_archive/
+video_downloads/
+telegram-bot-api-data/
+douyin_downloader/
+douyin_cookies.txt
+douyin_cookies.str
+telegram-bot-api.env

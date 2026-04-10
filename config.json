@@ -5,7 +5,7 @@
     "ping": "pong"
   },
   "proxy": "http://127.0.0.1:2080",
-  "archive_dir": "~/telegram_archive",
+  "archive_dir": "telegram_archive",
   "notify_port": 8765,
   "poll_interval": 2,
   "shell_timeout": 30,
@@ -24,9 +24,9 @@
   "privileged_shell_whitelist": [
     "df -h"
   ],
-  "video_download_dir": "~/video_downloads",
+  "video_download_dir": "video_downloads",
   "video_download_cookies_bilibili": "~/claude-workspace/telegram_monitor/bilibili_cookie.txt",
-  "video_download_cookies_douyin": "~/douyin_cookies.txt",
+  "video_download_cookies_douyin": "douyin_cookies.txt",
   "video_download_timeout": 600,
   "video_download_transcode_threads": 1,
   "email_enabled": true,
@@ -42,5 +42,8 @@
     "重要"
   ],
   "email_claude_model": "claude-sonnet-4-6",
-  "email_claude_max_tokens": 200
+  "email_claude_max_tokens": 200,
+  "telegram_api_base": "http://127.0.0.1:8081",
+  "telegram_local_mode": true,
+  "telegram_upload_limit_mb": 2000
 }

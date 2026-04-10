@@ -113,7 +113,12 @@ def main():
         logger.warning("ANTHROPIC_API_KEY not set — Claude API backend will fail on use")
 
     token, chat_id = load_credentials()
-    client = TelegramClient(token, chat_id, proxy=config.get("proxy", ""))
+    client = TelegramClient(
+        token, chat_id,
+        proxy=config.get("proxy", ""),
+        api_base=config.get("telegram_api_base", ""),
+        local_mode=config.get("telegram_local_mode", False),
+    )
 
     shell_handler = ShellHandler(
         timeout=config.get("shell_timeout", 30),
@@ -140,21 +145,22 @@ def main():
     )
     preset_handler = PresetHandler(config.get("presets", {}))
     media_archive_handler = MediaArchiveHandler(
-        archive_dir=config.get("archive_dir", "~/telegram_archive"),
+        archive_dir=config.get("archive_dir", "telegram_archive"),
         telegram_client=client,
     )
     file_archive_handler = FileArchiveHandler(
-        archive_dir=config.get("archive_dir", "~/telegram_archive"),
+        archive_dir=config.get("archive_dir", "telegram_archive"),
         telegram_client=client,
     )
     video_download_handler = VideoDownloadHandler(
-        download_dir=config.get("video_download_dir", "~/video_downloads"),
+        download_dir=config.get("video_download_dir", "video_downloads"),
         cookies_bilibili=config.get("video_download_cookies_bilibili", ""),
         cookies_douyin=config.get("video_download_cookies_douyin", ""),
         proxy=config.get("proxy", ""),
         timeout=config.get("video_download_timeout", 600),
         transcode_threads=config.get("video_download_transcode_threads", 1),
         telegram_client=client,
+        upload_limit_mb=config.get("telegram_upload_limit_mb", 50),
     )
     # Email monitor (optional, disabled by default)
     email_monitor_handler = None
