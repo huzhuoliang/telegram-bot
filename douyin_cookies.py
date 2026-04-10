@@ -16,7 +16,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COOKIE_PATH = Path("~/douyin_cookies.txt").expanduser()
+DEFAULT_COOKIE_PATH = Path(__file__).parent / "douyin_cookies.txt"
 
 # Must match TikTokDownloader's UA for ABogus signature compatibility
 DOUYIN_USER_AGENT = (

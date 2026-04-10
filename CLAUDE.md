@@ -70,6 +70,7 @@ handlers/             — handler package (split from monolithic handlers.py)
 bilibili_cookies.py   — Bilibili cookie validation + QR-code login + daily auto-refresh
 douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
 douyin-api.service    — systemd unit for TikTokDownloader Docker container
+telegram-bot-api.service — systemd unit for local Telegram Bot API server (Docker)
 notify_server.py      — localhost:8765 HTTP server for outbound notifications
 send.py               — CLI helper to POST to notify server (stdlib only)
 debug_bus.py          — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
@@ -161,7 +162,7 @@ For URLs that Telegram can't fetch directly (e.g. Wikipedia), `telegram_client` 
 
 Incoming photos/videos/documents are saved to `archive_dir`:
 ```
-~/telegram_archive/
+telegram_archive/
 ├── photos/     YYYY-MM-DD_HH-MM-SS.jpg
 ├── videos/     YYYY-MM-DD_HH-MM-SS.<ext>
 └── documents/  <original filename>
@@ -173,7 +174,7 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 |-----|---------|-------------|
 | `presets` | `{}` | Keyword → response mapping (case-insensitive) |
 | `proxy` | `""` | HTTP proxy for Telegram API (e.g. `http://127.0.0.1:2080`) |
-| `archive_dir` | `"~/telegram_archive"` | Directory for saved incoming media |
+| `archive_dir` | `"telegram_archive"` | Directory for saved incoming media (relative to project root) |
 | `notify_port` | `8765` | Port for local HTTP notification server |
 | `poll_interval` | `2` | Seconds to wait between retries on polling error |
 | `shell_timeout` | `30` | Max seconds for shell command execution |
@@ -189,11 +190,14 @@ Incoming photos/videos/documents are saved to `archive_dir`:
 | `privileged_claude_shell_timeout` | `60` | Shell command timeout for privileged handler |
 | `privileged_shell_whitelist` | `[]` | Commands that skip confirmation; suffix `*` = prefix match, exact otherwise |
 | `debug_port` | `8766` | Port for debug event TCP server |
-| `video_download_dir` | `"~/video_downloads"` | Directory for downloaded videos |
+| `video_download_dir` | `"video_downloads"` | Directory for downloaded videos (relative to project root) |
 | `video_download_cookies_bilibili` | `""` | Path to Bilibili cookies.txt (auto-refreshed via QR login) |
-| `video_download_cookies_douyin` | `"~/douyin_cookies.txt"` | Path to Douyin cookies (auto-refreshed by Playwright) |
+| `video_download_cookies_douyin` | `"douyin_cookies.txt"` | Path to Douyin cookies (auto-refreshed by Playwright) |
 | `video_download_timeout` | `600` | Download timeout in seconds |
 | `video_download_transcode_threads` | `1` | CPU threads for AV1→H.265 transcoding (controls both ffmpeg and x265 engine) |
+| `telegram_api_base` | `""` | Base URL for Bot API server; empty = cloud (`https://api.telegram.org`) |
+| `telegram_local_mode` | `false` | Enable local file path mode (requires local Bot API server with `--local`) |
+| `telegram_upload_limit_mb` | `50` | Upload limit in MB; 50 for cloud, 2000 for local Bot API server |
 | `email_enabled` | `false` | Enable email monitor |
 | `email_credentials_path` | `"email_credentials.json"` | Path to IMAP/SMTP credentials file |
 | `email_state_path` | `"email_state.json"` | Path to processed email state file |
@@ -265,5 +269,33 @@ sudo journalctl -u douyin-api -f
 - Docker image: `ghcr.io/joeanamier/tiktok-downloader:latest`
 - Network: `--network host` (shares host TUN proxy)
 - API endpoint: `http://127.0.0.1:5555/douyin/detail`
-- Config: `/home/huzhuoliang/douyin_downloader/settings.json`
+- Config: `douyin_downloader/settings.json` (in project directory)
 - Cookies: auto-refreshed via `douyin_cookies.py` (Playwright headless, 1 hour TTL)
+
+## Local Telegram Bot API Server
+
+Self-hosted Bot API server that raises the upload limit from 50MB to 2000MB. Uses `--local` mode for direct file path passing (no HTTP multipart upload needed).
+
+**Service name: `telegram-bot-api`**
+
+```bash
+sudo systemctl status telegram-bot-api
+sudo systemctl restart telegram-bot-api
+sudo journalctl -u telegram-bot-api -f
+```
+
+- Docker image: `aiogram/telegram-bot-api:latest`
+- Network: `--network host` (shares host TUN proxy)
+- API endpoint: `http://127.0.0.1:8081`
+- Requires `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org)
+- Service file: `telegram-bot-api.service`
+
+**Migration from cloud API (one-time):**
+1. Stop telegram_bot service
+2. Call `logOut` on cloud API: `curl "https://api.telegram.org/bot$(cat TOKEN.txt)/logOut"`
+3. Wait at least 10 minutes (Telegram cooldown)
+4. Start telegram-bot-api service
+5. Update `config.json`: set `telegram_api_base`, `telegram_local_mode`, `telegram_upload_limit_mb`
+6. Start telegram_bot service
+
+**Rollback to cloud API:** Call `logOut` on local server, wait 10 min, clear `telegram_api_base` in config
