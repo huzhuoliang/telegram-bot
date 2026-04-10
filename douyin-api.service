@@ -7,12 +7,13 @@ Requires=docker.service
 Type=simple
 Restart=always
 RestartSec=10
+EnvironmentFile=/etc/telegram-bot/project.env
 ExecStartPre=-/usr/bin/docker rm -f douyin-api
 ExecStart=/usr/bin/docker run --rm --name douyin-api \
     --network host \
-    -v /home/huzhuoliang/claude-workspace/telegram_monitor/douyin_downloader/settings.json:/app/settings.json \
-    -v /home/huzhuoliang/claude-workspace/telegram_monitor/douyin_downloader:/app/Volume \
-    -v /home/huzhuoliang/claude-workspace/telegram_monitor/douyin_downloader/start.sh:/start.sh:ro \
+    -v ${PROJECT_DIR}/douyin_downloader/settings.json:/app/settings.json \
+    -v ${PROJECT_DIR}/douyin_downloader:/app/Volume \
+    -v ${PROJECT_DIR}/douyin_downloader/start.sh:/start.sh:ro \
     ghcr.io/joeanamier/tiktok-downloader:latest \
     sh /start.sh
 ExecStop=/usr/bin/docker stop douyin-api

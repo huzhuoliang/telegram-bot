@@ -7,7 +7,8 @@ Requires=docker.service
 Type=simple
 Restart=always
 RestartSec=10
-EnvironmentFile=/home/huzhuoliang/claude-workspace/telegram_monitor/telegram-bot-api.env
+EnvironmentFile=/etc/telegram-bot/project.env
+EnvironmentFile=/etc/telegram-bot/api.env
 ExecStartPre=-/usr/bin/docker rm -f telegram-bot-api
 ExecStart=/usr/bin/docker run --rm --name telegram-bot-api \
     --network host \
@@ -15,8 +16,8 @@ ExecStart=/usr/bin/docker run --rm --name telegram-bot-api \
     -e TELEGRAM_API_HASH=${TELEGRAM_API_HASH} \
     -e TELEGRAM_LOCAL=true \
     -e TELEGRAM_STAT=true \
-    -v /home/huzhuoliang/claude-workspace/telegram_monitor/telegram-bot-api-data:/var/lib/telegram-bot-api \
-    -v /home/huzhuoliang/claude-workspace/telegram_monitor/video_downloads:/home/huzhuoliang/claude-workspace/telegram_monitor/video_downloads:ro \
+    -v ${PROJECT_DIR}/telegram-bot-api-data:/var/lib/telegram-bot-api \
+    -v ${PROJECT_DIR}/video_downloads:${PROJECT_DIR}/video_downloads:ro \
     aiogram/telegram-bot-api:latest
 ExecStop=/usr/bin/docker stop telegram-bot-api
 
