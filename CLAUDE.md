@@ -29,7 +29,8 @@ curl -X POST http://127.0.0.1:8765/send_video  -H 'Content-Type: application/jso
 **Service name: `telegram_bot`**
 
 ```bash
-# Install (one-time)
+# Generate from template (one-time)
+sed "s/YOUR_USER/$(whoami)/" telegram_bot.service.example > telegram_bot.service
 sudo cp telegram_bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now telegram_bot
@@ -41,10 +42,11 @@ sudo systemctl stop telegram_bot
 sudo journalctl -u telegram_bot -f
 ```
 
-When `claude_backend = "api"`, also create `/etc/telegram_bot.env` (mode 600):
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
+Environment files in `/etc/telegram-bot/`:
+- `project.env` — `PROJECT_DIR=<absolute path to project>` (used by all services)
+- `api.env` — `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` (for local Bot API server, chmod 600)
+
+See README.md for full deployment instructions.
 
 ## Architecture
 
@@ -69,8 +71,8 @@ handlers/             — handler package (split from monolithic handlers.py)
   email_monitor.py    — EmailMonitorHandler (IMAP monitoring, AI classification, digest)
 bilibili_cookies.py   — Bilibili cookie validation + QR-code login + daily auto-refresh
 douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
-douyin-api.service    — systemd unit for TikTokDownloader Docker container
-telegram-bot-api.service — systemd unit for local Telegram Bot API server (Docker)
+douyin-api.service.example    — systemd template for TikTokDownloader Docker container
+telegram-bot-api.service.example — systemd template for local Telegram Bot API server (Docker)
 notify_server.py      — localhost:8765 HTTP server for outbound notifications
 send.py               — CLI helper to POST to notify server (stdlib only)
 debug_bus.py          — debug event bus + TCP JSON Lines server (127.0.0.1:8766)
@@ -82,7 +84,7 @@ config.json           — presets, timeouts, model/backend settings
 help.txt              — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt             — Telegram bot token (never commit)
 CHAT_ID.txt           — authorized chat ID (never commit)
-telegram_bot.service  — systemd unit
+telegram_bot.service.example — systemd template
 ```
 
 **Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. When email monitor is enabled, additional daemon threads run per-account IMAP monitoring and digest scheduling. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
@@ -288,7 +290,7 @@ sudo journalctl -u telegram-bot-api -f
 - Network: `--network host` (shares host TUN proxy)
 - API endpoint: `http://127.0.0.1:8081`
 - Requires `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org)
-- Service file: `telegram-bot-api.service`
+- Service template: `telegram-bot-api.service.example`
 
 **Migration from cloud API (one-time):**
 1. Stop telegram_bot service

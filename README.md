@@ -53,7 +53,7 @@ Send messages to your bot in Telegram:
 | `!clear` or `/clear` | Clears Claude conversation history |
 | any other text | Forwarded to Claude |
 
-**Forwarding media:** Send or forward any photo, video, or document to the bot — it will be saved to `~/telegram_archive/` on the server and the bot will confirm with the saved path.
+**Forwarding media:** Send or forward any photo, video, or document to the bot — it will be saved to `telegram_archive/` on the server and the bot will confirm with the saved path.
 
 ## Sending notifications from other scripts
 
@@ -67,7 +67,7 @@ python3 send.py "Backup completed successfully"
 python3 send.py --photo /tmp/screenshot.png --caption "今日报表"
 python3 send.py --photo "https://example.com/chart.png"
 
-# Video (local file or URL, max 50 MB)
+# Video (local file or URL; up to 2 GB with local Bot API server)
 python3 send.py --video /tmp/recording.mp4 --caption "录像"
 python3 send.py --video "https://example.com/clip.mp4"
 ```
@@ -98,13 +98,23 @@ Edit `config.json` to customize behavior:
     "ping": "pong",
     "status": "服务运行中。"
   },
-  "proxy": "http://127.0.0.1:2080",
-  "archive_dir": "~/telegram_archive",
+  "proxy": "",
+  "archive_dir": "telegram_archive",
   "notify_port": 8765,
   "shell_timeout": 30,
   "claude_backend": "cli",
-  "claude_cli_timeout": 120
+  "claude_cli_timeout": 120,
+  "telegram_api_base": "",
+  "telegram_local_mode": false,
+  "telegram_upload_limit_mb": 50
 }
+```
+
+To use the local Bot API server (2 GB uploads), set:
+```json
+"telegram_api_base": "http://127.0.0.1:8081",
+"telegram_local_mode": true,
+"telegram_upload_limit_mb": 2000
 ```
 
 ### Claude backends
@@ -116,24 +126,87 @@ Edit `config.json` to customize behavior:
 
 Both backends support inline media delivery — Claude can respond with `[PHOTO: url]` markers that are automatically fetched and sent to you.
 
-## Running as a systemd service
+## Systemd services deployment
 
-**Service name: `telegram_bot`**
+All services use `.service.example` templates. Copy and configure before installing.
+
+### 1. Create environment files
 
 ```bash
-# Install (one-time)
-sudo cp telegram_bot.service /etc/systemd/system/
+# Project path (required by all services)
+sudo mkdir -p /etc/telegram-bot
+echo "PROJECT_DIR=$(pwd)" | sudo tee /etc/telegram-bot/project.env
+
+# Telegram Bot API credentials (required only for local Bot API server)
+sudo tee /etc/telegram-bot/api.env > /dev/null <<EOF
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+EOF
+sudo chmod 600 /etc/telegram-bot/api.env
+
+# Anthropic API key (required only for claude_backend="api")
+# sudo tee /etc/telegram_bot.env > /dev/null <<EOF
+# ANTHROPIC_API_KEY=sk-ant-...
+# EOF
+# sudo chmod 600 /etc/telegram_bot.env
+```
+
+### 2. Generate service files from templates
+
+```bash
+# Main bot service — replace YOUR_USER with your username
+sed "s/YOUR_USER/$(whoami)/" telegram_bot.service.example > telegram_bot.service
+
+# Docker services — no changes needed, just copy
+cp telegram-bot-api.service.example telegram-bot-api.service
+cp douyin-api.service.example douyin-api.service
+```
+
+### 3. Install and start
+
+```bash
+sudo cp telegram_bot.service telegram-bot-api.service douyin-api.service /etc/systemd/system/
 sudo systemctl daemon-reload
+
+# Main bot (required)
 sudo systemctl enable --now telegram_bot
 
-# Daily operations
-sudo systemctl status telegram_bot
-sudo systemctl restart telegram_bot
-sudo systemctl stop telegram_bot
-sudo journalctl -u telegram_bot -f
+# Local Bot API server (optional, enables 2 GB uploads)
+sudo systemctl enable --now telegram-bot-api
+
+# Douyin downloader API (optional, for /dl douyin links)
+sudo systemctl enable --now douyin-api
 ```
 
-If using `claude_backend = "api"`, store the API key in `/etc/telegram_bot.env` (mode 600):
+### Migrating to local Bot API server
+
+The local Bot API server requires a one-time migration from the cloud API:
+
+```bash
+# 1. Stop bot
+sudo systemctl stop telegram_bot
+
+# 2. Log out from cloud API
+curl "https://api.telegram.org/bot$(cat TOKEN.txt)/logOut"
+
+# 3. Start local server and wait for it to be ready
+sudo systemctl start telegram-bot-api
+
+# 4. Verify
+curl http://127.0.0.1:8081/bot$(cat TOKEN.txt)/getMe
+
+# 5. Update config.json (set telegram_api_base, telegram_local_mode, telegram_upload_limit_mb)
+
+# 6. Restart bot
+sudo systemctl start telegram_bot
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+
+**Rollback:** Call `logOut` on the local server, wait 10 minutes (Telegram cooldown), clear `telegram_api_base` in config, restart bot.
+
+### Daily operations
+
+```bash
+sudo systemctl status telegram_bot
+sudo systemctl restart telegram_bot
+sudo journalctl -u telegram_bot -f
 ```
