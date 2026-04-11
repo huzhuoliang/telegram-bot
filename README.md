@@ -1,3 +1,5 @@
+**English** | [中文](README_zh.md)
+
 # telegram-monitor
 
 Personal Telegram bot service. Runs on your server, polls Telegram for messages, and lets any local script send notifications to your Telegram account.
