@@ -9,8 +9,13 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 - **Notifications** — other scripts/apps POST to a local HTTP endpoint to send messages, photos, or videos
 - **Shell execution** — send `!<command>` to run it on the server and get output back
 - **Claude AI** — send `?<question>` (or any text) to get an AI response; Claude can also search and send photos/videos inline
+- **Privileged Claude** — send `$<text>` for an AI assistant with unrestricted shell and file access, with interactive confirmation for commands
+- **Video download** — send `/dl <URL>` to download videos from Douyin (watermark-free), Bilibili (4K/HDR), YouTube, and other sites supported by yt-dlp
+- **Email monitor** — IMAP-based email monitoring with AI-powered classification (urgent/normal/spam) and periodic digest reports
+- **Image recognition** — send a photo with a caption to get Claude's analysis (API backend only)
 - **Preset replies** — configure fixed keyword → response pairs
-- **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically
+- **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically; browse with `/files`
+- **LaTeX rendering** — Claude can render LaTeX formulas as images in responses
 - **Debug monitor** — real-time TUI to inspect Telegram I/O, Claude API calls, shell commands, and routing (see [DEBUG.md](DEBUG.md))
 - **No public IP needed** — uses long-polling, no webhook required
 
@@ -50,12 +55,22 @@ Send messages to your bot in Telegram:
 | `!ls -la /tmp` | Runs shell command, returns stdout + stderr + exit code |
 | `?explain DNS` | Asks Claude, returns response in Chinese |
 | `搜索一张XXX的照片` | Claude finds a photo and sends it to you |
-| `ping` | Returns `pong` (preset) |
-| `help` | Returns command reference (preset) |
-| `!clear` or `/clear` | Clears Claude conversation history |
+| `$check disk usage` | Privileged Claude — can run any command (with confirmation) |
+| `$$deploy the app` | Privileged Claude — auto-approve all commands (no confirmation) |
+| `/dl <URL>` | Download video from Douyin, Bilibili, YouTube, etc. |
+| `/email` | Email monitor status; `/email digest`, `/email check`, etc. |
+| `/files` | Browse archived files (paginated inline keyboard) |
+| `/help` | Display command reference |
+| `/status` | Show current Claude backend status |
+| `/ctx` / `$ctx` | Context window usage for regular / privileged Claude |
+| `/setkey <KEY>` | Set Anthropic API key, switch to API backend |
+| `/setcli` | Switch back to CLI backend |
+| `!clear` or `/clear` | Clear Claude conversation history |
+| `$clear` | Clear privileged Claude conversation history |
+| Photo + caption | Claude image recognition (API backend only) |
+| Photo / video / document | Auto-saved to `telegram_archive/` on the server |
+| Emoji reaction | Bot replies with the same emoji |
 | any other text | Forwarded to Claude |
-
-**Forwarding media:** Send or forward any photo, video, or document to the bot — it will be saved to `telegram_archive/` on the server and the bot will confirm with the saved path.
 
 ## Sending notifications from other scripts
 
@@ -89,6 +104,64 @@ curl -X POST http://127.0.0.1:8765/send_video \
   -H 'Content-Type: application/json' \
   -d '{"video": "/tmp/clip.mp4", "caption": "optional"}'
 ```
+
+## Video download
+
+Send `/dl <URL>` to download videos. Supports:
+
+| Platform | Backend | Notes |
+|----------|---------|-------|
+| **Douyin** | TikTokDownloader API (Docker) | Watermark-free, highest quality. Paste share text directly — URL is auto-extracted. Cookies auto-refreshed via Playwright. |
+| **Bilibili** | yt-dlp | 4K/HDR preferred. Auto-validates cookie; triggers QR-code login if expired. Anonymous mode falls back to 1080p. |
+| **YouTube & others** | yt-dlp | Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp). |
+
+After download:
+- Files within the upload limit (50 MB cloud / 2 GB local Bot API) are uploaded to Telegram directly
+- Larger files return the local path on the server
+- AV1-encoded videos are automatically transcoded to H.265 for iPhone compatibility (with live progress updates)
+
+Requires `yt-dlp` and `ffmpeg` installed. For Douyin, also requires the `douyin-api` service running (see [Systemd services](#systemd-services-deployment)).
+
+## Privileged Claude
+
+Send `$<text>` to use an AI assistant with full system access. Unlike regular Claude, it can:
+- Execute **any** shell command (including `sudo`)
+- Read and write **any** file on the server
+
+**Safety mechanism:** Before executing a shell command, the bot sends a confirmation message with three buttons:
+- ✅ **Allow once** — execute this command only
+- 📌 **Add to whitelist** — execute and allow this command pattern in the future
+- ❌ **Reject** — deny execution (auto-rejects after 60s timeout)
+
+Send `$$<text>` to auto-approve all commands in that session (each command still shows a silent notification).
+
+Whitelist management:
+```
+$whitelist list              — view current whitelist
+$whitelist add <cmd or prefix*>  — add (e.g. ls* for prefix match)
+$whitelist remove <number>   — remove by index
+```
+
+## Email monitor
+
+IMAP-based email monitoring with AI-powered classification. Requires `email_enabled: true` in `config.json`.
+
+| Command | Action |
+|---------|--------|
+| `/email` | Show monitor status and statistics |
+| `/email digest` | Send AI-generated digest report immediately |
+| `/email check` | Force-check all accounts now |
+| `/email pause` | Pause monitoring |
+| `/email resume` | Resume monitoring |
+| `/email send <to> <subject> <body>` | Send an email via SMTP |
+
+Features:
+- Each incoming email is classified by AI as **urgent**, **normal**, or **spam**
+- Urgent emails trigger immediate Telegram alerts
+- Periodic AI-generated digest reports (configurable interval, default 6 hours)
+- Supports IMAP IDLE for real-time push (except QQ Mail)
+
+See `email_credentials.json` for account configuration format.
 
 ## Configuration
 

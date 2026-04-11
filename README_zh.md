@@ -9,8 +9,13 @@
 - **通知推送** — 其他脚本/应用通过 POST 本地 HTTP 接口发送消息、图片或视频
 - **Shell 执行** — 发送 `!<命令>` 在服务器上执行并返回输出
 - **Claude AI** — 发送 `?<问题>`（或任意文本）获取 AI 回复；Claude 还能搜索并内联发送图片/视频
+- **特权 Claude** — 发送 `$<文本>` 使用拥有完整 Shell 和文件访问权限的 AI 助手，执行命令前需交互确认
+- **视频下载** — 发送 `/dl <链接>` 下载抖音（无水印）、B站（4K/HDR）、YouTube 及其他 yt-dlp 支持的平台视频
+- **邮件监控** — 基于 IMAP 的邮件监控，AI 智能分类（紧急/普通/垃圾），定时生成摘要报告
+- **图片识别** — 发送图片附带文字说明，Claude 会分析图片内容（仅 API 后端）
 - **预设回复** — 配置固定的关键词 → 回复对
-- **媒体归档** — 转发图片/视频/文档给机器人，自动保存到服务器
+- **媒体归档** — 转发图片/视频/文档给机器人，自动保存到服务器；使用 `/files` 浏览归档
+- **LaTeX 渲染** — Claude 可在回复中渲染 LaTeX 公式为图片
 - **调试监控** — 实时 TUI 查看 Telegram I/O、Claude API 调用、Shell 命令和路由决策（详见 [DEBUG.md](DEBUG.md)）
 - **无需公网 IP** — 使用长轮询，无需 Webhook
 
@@ -50,12 +55,22 @@ python3 bot.py
 | `!ls -la /tmp` | 执行 Shell 命令，返回 stdout + stderr + 退出码 |
 | `?explain DNS` | 询问 Claude，返回中文回复 |
 | `搜索一张XXX的照片` | Claude 搜索图片并发送给你 |
-| `ping` | 返回 `pong`（预设） |
-| `help` | 返回命令参考（预设） |
-| `!clear` 或 `/clear` | 清除 Claude 对话历史 |
+| `$检查磁盘使用情况` | 特权 Claude — 可执行任意命令（需确认） |
+| `$$部署应用` | 特权 Claude — 自动批准所有命令（免确认） |
+| `/dl <链接>` | 下载抖音、B站、YouTube 等平台视频 |
+| `/email` | 邮件监控状态；`/email digest`、`/email check` 等 |
+| `/files` | 浏览归档文件（分页 inline keyboard） |
+| `/help` | 显示命令帮助 |
+| `/status` | 查看当前 Claude 后端状态 |
+| `/ctx` / `$ctx` | 查看普通 / 特权 Claude 上下文用量 |
+| `/setkey <KEY>` | 设置 Anthropic API 密钥，切换到 API 后端 |
+| `/setcli` | 切回 CLI 后端 |
+| `!clear` 或 `/clear` | 清空 Claude 对话历史 |
+| `$clear` | 清空特权 Claude 对话历史 |
+| 图片 + 文字说明 | Claude 图片识别（仅 API 后端） |
+| 图片 / 视频 / 文档 | 自动保存到服务器 `telegram_archive/` |
+| 表情反应 | 机器人回复相同的 emoji |
 | 其他任意文本 | 转发给 Claude |
-
-**转发媒体：** 发送或转发任何图片、视频或文档给机器人 — 它会保存到服务器的 `telegram_archive/` 目录，并回复确认保存路径。
 
 ## 从其他脚本发送通知
 
@@ -89,6 +104,64 @@ curl -X POST http://127.0.0.1:8765/send_video \
   -H 'Content-Type: application/json' \
   -d '{"video": "/tmp/clip.mp4", "caption": "可选说明"}'
 ```
+
+## 视频下载
+
+发送 `/dl <链接>` 下载视频。支持平台：
+
+| 平台 | 后端 | 说明 |
+|------|------|------|
+| **抖音** | TikTokDownloader API（Docker） | 无水印最高画质。可直接粘贴分享文本，自动提取链接。Cookie 通过 Playwright 自动刷新。 |
+| **B站** | yt-dlp | 4K/HDR 优先。自动验证 Cookie，失效时触发扫码登录。匿名模式最高 1080p。 |
+| **YouTube 及其他** | yt-dlp | 支持所有 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 兼容的网站。 |
+
+下载完成后：
+- 文件在上传限制内（云端 50 MB / 本地 Bot API 2 GB）→ 直接上传到 Telegram
+- 超过限制 → 返回服务器本地路径
+- AV1 编码的视频自动转码为 H.265（iPhone 兼容），带实时进度显示
+
+需要安装 `yt-dlp` 和 `ffmpeg`。抖音下载还需要运行 `douyin-api` 服务（见 [Systemd 服务部署](#systemd-服务部署)）。
+
+## 特权 Claude
+
+发送 `$<文本>` 使用拥有完整系统访问权限的 AI 助手。与普通 Claude 不同，它可以：
+- 执行**任意** Shell 命令（包括 `sudo`）
+- 读写服务器上的**任意**文件
+
+**安全机制：** 执行 Shell 命令前，机器人会发送确认消息，带有三个按钮：
+- ✅ **允许一次** — 仅执行本次命令
+- 📌 **加入白名单** — 执行并允许后续相同命令模式
+- ❌ **拒绝** — 拒绝执行（60 秒超时自动拒绝）
+
+发送 `$$<文本>` 自动批准该次会话中的所有命令（每条命令仍会静默通知）。
+
+白名单管理：
+```
+$whitelist list              — 查看白名单
+$whitelist add <命令或前缀*>  — 添加（如 ls* 表示前缀匹配）
+$whitelist remove <序号>     — 按序号删除
+```
+
+## 邮件监控
+
+基于 IMAP 的邮件监控，支持 AI 智能分类。需要在 `config.json` 中设置 `email_enabled: true`。
+
+| 命令 | 动作 |
+|------|------|
+| `/email` | 显示监控状态和统计信息 |
+| `/email digest` | 立即发送 AI 生成的邮件摘要 |
+| `/email check` | 立即检查所有账号新邮件 |
+| `/email pause` | 暂停监控 |
+| `/email resume` | 恢复监控 |
+| `/email send <收件人> <主题> <正文>` | 通过 SMTP 发送邮件 |
+
+功能特点：
+- 每封新邮件由 AI 自动分类为**紧急**、**普通**或**垃圾邮件**
+- 紧急邮件立即推送 Telegram 提醒
+- 定时生成 AI 邮件摘要报告（默认 6 小时间隔，可配置）
+- 支持 IMAP IDLE 实时推送（QQ 邮箱除外）
+
+账号配置格式参见 `email_credentials.json`。
 
 ## 配置
 
