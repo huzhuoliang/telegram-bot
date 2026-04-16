@@ -13,6 +13,7 @@
 - **视频下载** — 发送 `/dl <链接>` 下载抖音（无水印）、B站（4K/HDR）、YouTube 及其他 yt-dlp 支持的平台视频
 - **邮件监控** — 基于 IMAP 的邮件监控，AI 智能分类（紧急/普通/垃圾），定时生成摘要报告
 - **B站收藏夹监控** — 自动下载监控的 B站收藏夹中新增视频，支持持久化队列和 NAS rsync 同步
+- **B站UP主监控** — 监控指定 B站 UP主 的新视频上传，支持仅通知或自动下载模式，WBI 签名 API，持久化队列和 NAS 同步
 - **图片识别** — 发送图片附带文字说明，Claude 会分析图片内容（仅 API 后端）
 - **预设回复** — 配置固定的关键词 → 回复对
 - **媒体归档** — 转发图片/视频/文档给机器人，自动保存到服务器；使用 `/files` 浏览归档
@@ -61,6 +62,7 @@ python3 bot.py
 | `/dl <链接>` | 下载抖音、B站、YouTube 等平台视频 |
 | `/email` | 邮件监控状态；`/email digest`、`/email check` 等 |
 | `/fav` | B站收藏夹监控；`/fav folders`、`/fav add`、`/fav download`、`/fav sync` 等 |
+| `/up` | B站UP主监控；`/up add`、`/up download`、`/up mode`、`/up sync` 等 |
 | `/files` | 浏览归档文件（分页 inline keyboard） |
 | `/help` | 显示命令帮助 |
 | `/status` | 查看当前 Claude 后端状态 |
@@ -189,6 +191,35 @@ $whitelist remove <序号>     — 按序号删除
 - 按收藏夹名称分子文件夹存放
 - 可选 NAS 同步（rsync） — 下载后自动同步并删除本地文件；启动时自动补同步之前未同步的文件
 - 使用已有的 B站大会员 Cookie 下载最高画质
+
+## B站UP主监控
+
+监控指定 B站 UP主 的新视频上传。需要在 `config.json` 中设置 `bilibili_up_enabled: true`，并确保 B站 Cookie 有效。
+
+| 命令 | 动作 |
+|------|------|
+| `/up` | 查看监控状态 |
+| `/up list` | 查看监控中的 UP主 及模式 |
+| `/up add <UID>` | 添加 UP主 监控（仅通知模式） |
+| `/up add <UID> --download` | 添加 UP主 监控（自动下载模式） |
+| `/up remove <UID>` | 移除 UP主 监控 |
+| `/up mode <UID> notify/download` | 切换通知/下载模式 |
+| `/up download <UID>` | 全量下载该 UP主 所有视频 |
+| `/up check` | 立即检查新视频 |
+| `/up sync` | 同步本地文件到 NAS |
+| `/up queue` | 查看下载队列（当前 + 等待） |
+| `/up pause` / `/up resume` | 暂停/恢复监控 |
+| `/up history [N]` | 最近下载记录 |
+
+功能特点：
+- 每个 UP主 支持两种模式：**仅通知**（只发 Telegram 提醒）或**自动下载**（下载 + NAS 同步）
+- 可配置轮询间隔（默认 5 分钟），使用 `last_check_aid` 高效检测新视频
+- 支持全量下载命令，一次性下载 UP主 所有视频
+- 使用 WBI 签名访问 B站空间 API
+- 持久化下载队列 — 重启后自动恢复
+- 按 UP主 名称分子文件夹存放
+- 复用收藏夹监控的 NAS 同步配置
+- 大量新视频时自动合并为一条通知（避免 Telegram 限流）
 
 ## 配置
 

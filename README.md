@@ -13,6 +13,7 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 - **Video download** — send `/dl <URL>` to download videos from Douyin (watermark-free), Bilibili (4K/HDR), YouTube, and other sites supported by yt-dlp
 - **Email monitor** — IMAP-based email monitoring with AI-powered classification (urgent/normal/spam) and periodic digest reports
 - **Bilibili favorites monitor** — auto-download videos from monitored Bilibili favorites folders, with persistent queue and optional NAS sync via rsync
+- **Bilibili UP monitor** — monitor Bilibili uploaders for new video uploads with notification-only or auto-download mode, WBI-signed API, persistent queue and NAS sync
 - **Image recognition** — send a photo with a caption to get Claude's analysis (API backend only)
 - **Preset replies** — configure fixed keyword → response pairs
 - **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically; browse with `/files`
@@ -61,6 +62,7 @@ Send messages to your bot in Telegram:
 | `/dl <URL>` | Download video from Douyin, Bilibili, YouTube, etc. |
 | `/email` | Email monitor status; `/email digest`, `/email check`, etc. |
 | `/fav` | Bilibili favorites monitor; `/fav folders`, `/fav add`, `/fav download`, `/fav sync`, etc. |
+| `/up` | Bilibili UP monitor; `/up add`, `/up download`, `/up mode`, `/up sync`, etc. |
 | `/files` | Browse archived files (paginated inline keyboard) |
 | `/help` | Display command reference |
 | `/status` | Show current Claude backend status |
@@ -189,6 +191,35 @@ Features:
 - Per-folder subdirectories (named after folder title)
 - Optional NAS sync via rsync — automatically syncs after download and deletes local files; unsynced files from previous sessions are synced on startup
 - Downloads use existing Bilibili VIP cookie for best quality
+
+## Bilibili UP monitor
+
+Monitor Bilibili uploaders (UP主) for new video uploads. Requires `bilibili_up_enabled: true` in `config.json` and a valid Bilibili cookie.
+
+| Command | Action |
+|---------|--------|
+| `/up` | Show monitor status |
+| `/up list` | List monitored uploaders with mode |
+| `/up add <UID>` | Add uploader (notify-only mode) |
+| `/up add <UID> --download` | Add uploader (auto-download mode) |
+| `/up remove <UID>` | Remove uploader from monitoring |
+| `/up mode <UID> notify/download` | Switch mode for an uploader |
+| `/up download <UID>` | Queue all videos from uploader for download |
+| `/up check` | Trigger immediate check for new videos |
+| `/up sync` | Sync all local files to NAS |
+| `/up queue` | View download queue (current + pending) |
+| `/up pause` / `/up resume` | Pause/resume monitoring |
+| `/up history [N]` | Recent download history |
+
+Features:
+- Two modes per uploader: **notify-only** (just sends a Telegram alert) or **auto-download** (downloads + NAS sync)
+- Polls at configurable intervals (default 5 minutes) using `last_check_aid` for efficient new-video detection
+- Full-download command to queue all existing videos from an uploader
+- WBI-signed API requests for Bilibili space endpoint
+- Persistent download queue — survives bot restarts
+- Per-uploader subdirectories (named after uploader name)
+- Reuses NAS sync configuration from favorites monitor
+- Batch notifications when many new videos are detected (avoids Telegram rate limits)
 
 ## Configuration
 
