@@ -47,6 +47,20 @@
   <code>/fav pause</code> / <code>/fav resume</code> — 暂停/恢复
   <code>/fav history</code> — 最近下载记录
 
+<b>B站UP主监控</b>
+  <code>/up</code> — 查看监控状态
+  <code>/up list</code> — 查看监控中的UP主
+  <code>/up add UID</code> — 添加UP主（仅通知模式）
+  <code>/up add UID --download</code> — 添加UP主（自动下载模式）
+  <code>/up remove UID</code> — 移除监控
+  <code>/up mode UID notify/download</code> — 切换通知/下载模式
+  <code>/up download UID</code> — 全量下载UP主视频
+  <code>/up check</code> — 立即检查新视频
+  <code>/up sync</code> — 同步本地文件到 NAS
+  <code>/up queue</code> — 查看下载队列
+  <code>/up pause</code> / <code>/up resume</code> — 暂停/恢复
+  <code>/up history</code> — 最近下载记录
+
 <b>媒体</b>
   发送图片/视频/文件 → 自动存档到服务器
   发送图片 + caption → Claude 识图（仅 api backend）

@@ -23,7 +23,8 @@ from pathlib import Path
 
 import debug_bus
 from handlers import (
-    BilibiliFavMonitorHandler, ClaudeHandler, EmailMonitorHandler,
+    BilibiliFavMonitorHandler, BilibiliUpMonitorHandler,
+    ClaudeHandler, EmailMonitorHandler,
     FileArchiveHandler, MediaArchiveHandler, PresetHandler,
     PrivilegedClaudeHandler, ShellHandler, VideoDownloadHandler,
 )
@@ -208,6 +209,29 @@ def main():
             shutdown_event=_shutdown_event,
         )
 
+    # Bilibili UP monitor (optional, disabled by default)
+    bilibili_up_handler = None
+    if config.get("bilibili_up_enabled", False):
+        up_state_path = config.get("bilibili_up_state_path", "bilibili_up_state.json")
+        if not os.path.isabs(up_state_path):
+            up_state_path = str(BASE_DIR / up_state_path)
+        up_download_dir = config.get("bilibili_up_download_dir", "video_downloads/bilibili_up")
+        if not os.path.isabs(up_download_dir):
+            up_download_dir = str(BASE_DIR / up_download_dir)
+        bilibili_up_handler = BilibiliUpMonitorHandler(
+            cookies_path=config.get("video_download_cookies_bilibili", ""),
+            state_path=up_state_path,
+            download_dir=up_download_dir,
+            download_timeout=config.get("bilibili_up_download_timeout", 600),
+            check_interval=config.get("bilibili_up_check_interval", 300),
+            proxy=config.get("proxy", ""),
+            nas_enabled=config.get("bilibili_fav_nas_enabled", False),
+            nas_host=config.get("bilibili_fav_nas_host", "nas"),
+            nas_dest_dir=config.get("bilibili_fav_nas_dest_dir", "/volume1/Share/BilibiliVideos"),
+            telegram_client=client,
+            shutdown_event=_shutdown_event,
+        )
+
     # Connect email monitor to Claude handlers for tool access
     if email_monitor_handler:
         claude_handler.set_email_monitor(email_monitor_handler)
@@ -220,7 +244,8 @@ def main():
                     config_path=args.config,
                     video_download_handler=video_download_handler,
                     email_monitor_handler=email_monitor_handler,
-                    bilibili_fav_handler=bilibili_fav_handler)
+                    bilibili_fav_handler=bilibili_fav_handler,
+                    bilibili_up_handler=bilibili_up_handler)
 
     # Start debug event server
     debug_bus.start(port=config.get("debug_port", 8766), shutdown_event=_shutdown_event)
@@ -251,6 +276,10 @@ def main():
     # Start Bilibili favorites monitor if enabled
     if bilibili_fav_handler:
         bilibili_fav_handler.start()
+
+    # Start Bilibili UP monitor if enabled
+    if bilibili_up_handler:
+        bilibili_up_handler.start()
 
     # Start Bilibili cookie auto-refresh scheduler
     bilibili_cookie_path = config.get("video_download_cookies_bilibili", "")

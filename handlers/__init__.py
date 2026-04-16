@@ -8,6 +8,7 @@ from handlers.media_archive import MediaArchiveHandler, FileArchiveHandler
 from handlers.video_download import VideoDownloadHandler
 from handlers.email_monitor import EmailMonitorHandler
 from handlers.bilibili_fav_monitor import BilibiliFavMonitorHandler
+from handlers.bilibili_up_monitor import BilibiliUpMonitorHandler
 
 __all__ = [
     "ShellHandler",
@@ -19,4 +20,5 @@ __all__ = [
     "VideoDownloadHandler",
     "EmailMonitorHandler",
     "BilibiliFavMonitorHandler",
+    "BilibiliUpMonitorHandler",
 ]

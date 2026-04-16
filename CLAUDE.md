@@ -70,6 +70,7 @@ handlers/             — handler package (split from monolithic handlers.py)
                         AV1→H.265 transcode with live progress, reply-to-message)
   email_monitor.py    — EmailMonitorHandler (IMAP monitoring, AI classification, digest)
   bilibili_fav_monitor.py — BilibiliFavMonitorHandler (favorites polling, download queue, notifications)
+  bilibili_up_monitor.py — BilibiliUpMonitorHandler (UP主 video upload monitoring, WBI signing, auto-download)
 bilibili_cookies.py   — Bilibili cookie validation + QR-code login + daily auto-refresh
 douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
 douyin-api.service.example    — systemd template for TikTokDownloader Docker container
@@ -82,6 +83,7 @@ DEBUG.md              — debug tool documentation (keyboard, mouse, search, arc
 email_credentials.json — IMAP/SMTP account credentials (never commit)
 email_state.json      — processed email UIDs state (auto-generated, never commit)
 bilibili_fav_state.json — Bilibili favorites monitor state (auto-generated, never commit)
+bilibili_up_state.json — Bilibili UP monitor state (auto-generated, never commit)
 config.json           — presets, timeouts, model/backend settings
 help.txt              — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt             — Telegram bot token (never commit)
@@ -89,7 +91,7 @@ CHAT_ID.txt           — authorized chat ID (never commit)
 telegram_bot.service.example — systemd template
 ```
 
-**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. When email monitor is enabled, additional daemon threads run per-account IMAP monitoring and digest scheduling. When Bilibili fav monitor is enabled, two daemon threads run the favorites poller and the download queue consumer. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
+**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. When email monitor is enabled, additional daemon threads run per-account IMAP monitoring and digest scheduling. When Bilibili fav monitor is enabled, two daemon threads run the favorites poller and the download queue consumer. When Bilibili UP monitor is enabled, two daemon threads run the UP video poller and the download queue consumer. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
 
 ## Debug monitor (debug_bus.py + debug.py)
 
@@ -131,6 +133,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | `/dl <URL or share text>` | VideoDownloadHandler — Douyin (TikTokDownloader API), Bilibili/other (yt-dlp); auto-extracts URL from share text; Bilibili auto-validates cookie and triggers QR login if expired |
 | `/email [subcommand]` | EmailMonitorHandler — status, digest, check, pause, resume, send |
 | `/fav [subcommand]` | BilibiliFavMonitorHandler — Bilibili favorites monitor: status, folders, add, remove, download, check, sync, queue, pause, resume, history |
+| `/up [subcommand]` | BilibiliUpMonitorHandler — UP主 video monitor: list, add, remove, mode, download, check, sync, queue, pause, resume, history |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `$<text>` | PrivilegedClaudeHandler — runs in background thread; shell commands require user confirmation via reaction (👍 once / 📌 whitelist / 👎 reject); whitelisted commands skip confirmation |
 | `?<text>` | ClaudeHandler |
@@ -212,6 +215,11 @@ telegram_archive/
 | `bilibili_fav_nas_enabled` | `false` | Enable rsync to NAS after download |
 | `bilibili_fav_nas_host` | `"nas"` | SSH alias for NAS (must be in `~/.ssh/config` with key auth) |
 | `bilibili_fav_nas_dest_dir` | `"/volume1/Share/BilibiliVideos"` | NAS destination base path |
+| `bilibili_up_enabled` | `false` | Enable Bilibili UP主 video monitor |
+| `bilibili_up_state_path` | `"bilibili_up_state.json"` | Path to UP monitor state file |
+| `bilibili_up_check_interval` | `300` | Seconds between UP video poll cycles |
+| `bilibili_up_download_dir` | `"video_downloads/bilibili_up"` | Download directory for UP videos |
+| `bilibili_up_download_timeout` | `600` | Per-video download timeout in seconds |
 | `email_enabled` | `false` | Enable email monitor |
 | `email_credentials_path` | `"email_credentials.json"` | Path to IMAP/SMTP credentials file |
 | `email_state_path` | `"email_state.json"` | Path to processed email state file |
@@ -316,6 +324,48 @@ video_downloads/bilibili_fav/
 ├── 音乐收藏/       视频标题 [BV2yy].mp4
 └── ...
 ```
+
+## Bilibili UP monitor (handlers/bilibili_up_monitor.py)
+
+Monitors specified Bilibili uploaders (UP主) for new video uploads, sends Telegram notifications, and optionally auto-downloads via yt-dlp.
+
+**Features:**
+- Monitor UP主 by UID, notify on new video uploads
+- Two modes per UP: notify-only (default) or auto-download
+- Full-download command to queue all videos from an UP
+- WBI signature for Bilibili space API authentication
+- Persistent download queue survives bot restarts
+- Per-UP download subdirectories (named after UP name)
+- Reuses Bilibili cookies and NAS sync configuration from fav monitor
+
+**Commands:**
+
+| Command | Action |
+|---|---|
+| `/up` | Show monitor status |
+| `/up list` | List monitored UP主 with mode |
+| `/up add <UID>` | Add UP主 (notify-only mode) |
+| `/up add <UID> --download` | Add UP主 (auto-download mode) |
+| `/up remove <UID>` | Remove UP主 from monitoring |
+| `/up mode <UID> notify/download` | Switch mode for an UP |
+| `/up download <UID>` | Queue all videos from UP for download |
+| `/up check` | Trigger immediate check |
+| `/up sync` | Sync all local files to NAS |
+| `/up queue` | View download queue (current + pending) |
+| `/up pause` / `/up resume` | Pause/resume monitoring |
+| `/up history [N]` | Recent download history (default 10) |
+
+**State file (`bilibili_up_state.json`):** auto-generated, tracks monitored UPs (with `last_check_aid` for efficient new-video detection), downloaded bvids (rolling window of 5000), download history (last 50), and persistent download queue. Atomic writes via tmp+rename.
+
+**Download directory structure:**
+```
+video_downloads/bilibili_up/
+├── UP主名称1/     视频标题 [BV1xx].mp4
+├── UP主名称2/     视频标题 [BV2yy].mp4
+└── ...
+```
+
+**NAS sync:** Reuses `bilibili_fav_nas_*` configuration. UP videos sync to the same NAS base path in per-UP-name subdirectories.
 
 ## Douyin video download (TikTokDownloader)
 

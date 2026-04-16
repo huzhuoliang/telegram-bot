@@ -11,7 +11,7 @@ class Router:
                  media_archive_handler=None, file_archive_handler=None,
                  privileged_claude_handler=None, config_path: str = None,
                  video_download_handler=None, email_monitor_handler=None,
-                 bilibili_fav_handler=None):
+                 bilibili_fav_handler=None, bilibili_up_handler=None):
         self.chat_id = str(chat_id).strip()
         self.shell = shell_handler
         self.claude = claude_handler
@@ -23,6 +23,7 @@ class Router:
         self.video_download = video_download_handler
         self.email_monitor = email_monitor_handler
         self.bilibili_fav = bilibili_fav_handler
+        self.bilibili_up = bilibili_up_handler
 
     def route(self, update: dict) -> str | None:
         """Return reply text, or None if the message should be silently ignored."""
@@ -122,6 +123,11 @@ class Router:
         if text.lower().startswith("/fav") and self.bilibili_fav:
             subcommand = text[4:].strip()
             return self.bilibili_fav.handle_command(subcommand)
+
+        # /up → Bilibili UP monitor commands
+        if (text.lower() == "/up" or text.lower().startswith("/up ")) and self.bilibili_up:
+            subcommand = text[3:].strip()
+            return self.bilibili_up.handle_command(subcommand)
 
         # /dl <URL> → 视频下载
         if text.lower().startswith("/dl ") and self.video_download:

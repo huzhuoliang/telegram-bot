@@ -10,6 +10,7 @@ __pycache__/
 email_credentials.json
 email_state.json
 bilibili_fav_state.json
+bilibili_up_state.json
 telegram_archive/
 video_downloads/
 telegram-bot-api-data/
