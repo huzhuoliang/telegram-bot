@@ -69,6 +69,7 @@ handlers/             — handler package (split from monolithic handlers.py)
   video_download.py   — VideoDownloadHandler (/dl command: Douyin API, yt-dlp,
                         AV1→H.265 transcode with live progress, reply-to-message)
   email_monitor.py    — EmailMonitorHandler (IMAP monitoring, AI classification, digest)
+  bilibili_fav_monitor.py — BilibiliFavMonitorHandler (favorites polling, download queue, notifications)
 bilibili_cookies.py   — Bilibili cookie validation + QR-code login + daily auto-refresh
 douyin_cookies.py     — Playwright headless Chromium → Douyin cookies (auto-refresh)
 douyin-api.service.example    — systemd template for TikTokDownloader Docker container
@@ -80,6 +81,7 @@ debug.py              — CLI debug monitor (streaming / Rich full-screen TUI / 
 DEBUG.md              — debug tool documentation (keyboard, mouse, search, architecture)
 email_credentials.json — IMAP/SMTP account credentials (never commit)
 email_state.json      — processed email UIDs state (auto-generated, never commit)
+bilibili_fav_state.json — Bilibili favorites monitor state (auto-generated, never commit)
 config.json           — presets, timeouts, model/backend settings
 help.txt              — /help command text (static sections; hot-reloaded on each /help)
 TOKEN.txt             — Telegram bot token (never commit)
@@ -87,7 +89,7 @@ CHAT_ID.txt           — authorized chat ID (never commit)
 telegram_bot.service.example — systemd template
 ```
 
-**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. When email monitor is enabled, additional daemon threads run per-account IMAP monitoring and digest scheduling. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
+**Threading:** main thread blocks on `_shutdown_event`; two daemon threads run the polling loop and the notify HTTP server. A third daemon thread runs the debug TCP server. When email monitor is enabled, additional daemon threads run per-account IMAP monitoring and digest scheduling. When Bilibili fav monitor is enabled, two daemon threads run the favorites poller and the download queue consumer. The notify server uses `server.timeout=1` + `handle_request()` loop (not `serve_forever()`) so shutdown is clean.
 
 ## Debug monitor (debug_bus.py + debug.py)
 
@@ -128,6 +130,7 @@ Messages from any chat other than `CHAT_ID.txt` are silently dropped.
 | `$whitelist <list\|add\|remove>` | PrivilegedClaudeHandler.handle_whitelist_cmd() — manage shell whitelist |
 | `/dl <URL or share text>` | VideoDownloadHandler — Douyin (TikTokDownloader API), Bilibili/other (yt-dlp); auto-extracts URL from share text; Bilibili auto-validates cookie and triggers QR login if expired |
 | `/email [subcommand]` | EmailMonitorHandler — status, digest, check, pause, resume, send |
+| `/fav [subcommand]` | BilibiliFavMonitorHandler — Bilibili favorites monitor: status, folders, add, remove, download, check, sync, queue, pause, resume, history |
 | `!<cmd>` | ShellHandler — runs in `~`, sudo blocked |
 | `$<text>` | PrivilegedClaudeHandler — runs in background thread; shell commands require user confirmation via reaction (👍 once / 📌 whitelist / 👎 reject); whitelisted commands skip confirmation |
 | `?<text>` | ClaudeHandler |
@@ -200,6 +203,15 @@ telegram_archive/
 | `telegram_api_base` | `""` | Base URL for Bot API server; empty = cloud (`https://api.telegram.org`) |
 | `telegram_local_mode` | `false` | Enable local file path mode (requires local Bot API server with `--local`) |
 | `telegram_upload_limit_mb` | `50` | Upload limit in MB; 50 for cloud, 2000 for local Bot API server |
+| `bilibili_fav_enabled` | `false` | Enable Bilibili favorites auto-download monitor |
+| `bilibili_fav_state_path` | `"bilibili_fav_state.json"` | Path to favorites monitor state file |
+| `bilibili_fav_check_interval` | `300` | Seconds between favorites poll cycles |
+| `bilibili_fav_download_dir` | `"video_downloads/bilibili_fav"` | Download directory (per-folder subdirectories) |
+| `bilibili_fav_download_timeout` | `600` | Per-video download timeout in seconds |
+| `bilibili_fav_initial_download_limit` | `0` | Videos to backfill on first folder add (0 = none, just mark known) |
+| `bilibili_fav_nas_enabled` | `false` | Enable rsync to NAS after download |
+| `bilibili_fav_nas_host` | `"nas"` | SSH alias for NAS (must be in `~/.ssh/config` with key auth) |
+| `bilibili_fav_nas_dest_dir` | `"/volume1/Share/BilibiliVideos"` | NAS destination base path |
 | `email_enabled` | `false` | Enable email monitor |
 | `email_credentials_path` | `"email_credentials.json"` | Path to IMAP/SMTP credentials file |
 | `email_state_path` | `"email_state.json"` | Path to processed email state file |
@@ -255,6 +267,55 @@ SMTP host is auto-derived from IMAP host (`imap.` → `smtp.`, port 465 SSL). Ov
 **State file (`email_state.json`):** auto-generated, tracks processed UIDs per account (rolling window of 500). Atomic writes via tmp+rename. New accounts process only the latest 20 emails on first run.
 
 **Known issue:** QQ Mail advertises IMAP IDLE capability but does not push notifications. Set `"idle": false` for QQ accounts.
+
+## Bilibili favorites monitor (handlers/bilibili_fav_monitor.py)
+
+Polls Bilibili favorites folders for newly added videos, auto-downloads via yt-dlp, sends text-only Telegram notifications.
+
+**Features:**
+- Configurable favorites folder monitoring (add/remove by media_id)
+- Polling with configurable interval (default 5 minutes)
+- Persistent download queue survives bot restarts
+- Per-folder download subdirectories (named after folder title)
+- Downloads reuse existing Bilibili cookies (VIP quality when available)
+- Full-folder download via `/fav download` command
+- Optional NAS sync via rsync (auto-deletes local files after sync)
+
+**Commands:**
+
+| Command | Action |
+|---|---|
+| `/fav` | Show monitor status |
+| `/fav folders` | List all user's Bilibili favorites folders (with IDs) |
+| `/fav list` | List currently monitored folders |
+| `/fav add <media_id>` | Add folder to monitoring (seeds existing videos as known) |
+| `/fav remove <media_id>` | Remove folder from monitoring |
+| `/fav download <media_id>` | Queue all videos in folder for download |
+| `/fav check` | Trigger immediate check |
+| `/fav sync` | Sync all local files to NAS |
+| `/fav queue` | View download queue (current + pending) |
+| `/fav pause` / `/fav resume` | Pause/resume monitoring |
+| `/fav history [N]` | Recent download history (default 10) |
+
+**State file (`bilibili_fav_state.json`):** auto-generated, tracks monitored folders, downloaded bvids (rolling window of 5000), download history (last 50), and persistent download queue. Atomic writes via tmp+rename.
+
+**NAS sync:** When `bilibili_fav_nas_enabled` is true, videos are rsynced to NAS after download (`--remove-source-files` deletes local copy). On startup, any previously downloaded but unsynced files are automatically synced. Requires SSH key auth to NAS host.
+
+**Download directory structure (local, before NAS sync):**
+```
+video_downloads/bilibili_fav/
+├── 默认收藏夹/     视频标题 [BV1xx].mp4
+├── 音乐收藏/       视频标题 [BV2yy].mp4
+└── ...
+```
+
+**NAS directory structure:**
+```
+/volume1/Share/BilibiliVideos/
+├── 默认收藏夹/     视频标题 [BV1xx].mp4
+├── 音乐收藏/       视频标题 [BV2yy].mp4
+└── ...
+```
 
 ## Douyin video download (TikTokDownloader)
 

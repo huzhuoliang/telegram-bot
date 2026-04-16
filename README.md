@@ -12,6 +12,7 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 - **Privileged Claude** — send `$<text>` for an AI assistant with unrestricted shell and file access, with interactive confirmation for commands
 - **Video download** — send `/dl <URL>` to download videos from Douyin (watermark-free), Bilibili (4K/HDR), YouTube, and other sites supported by yt-dlp
 - **Email monitor** — IMAP-based email monitoring with AI-powered classification (urgent/normal/spam) and periodic digest reports
+- **Bilibili favorites monitor** — auto-download videos from monitored Bilibili favorites folders, with persistent queue and optional NAS sync via rsync
 - **Image recognition** — send a photo with a caption to get Claude's analysis (API backend only)
 - **Preset replies** — configure fixed keyword → response pairs
 - **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically; browse with `/files`
@@ -59,6 +60,7 @@ Send messages to your bot in Telegram:
 | `$$deploy the app` | Privileged Claude — auto-approve all commands (no confirmation) |
 | `/dl <URL>` | Download video from Douyin, Bilibili, YouTube, etc. |
 | `/email` | Email monitor status; `/email digest`, `/email check`, etc. |
+| `/fav` | Bilibili favorites monitor; `/fav folders`, `/fav add`, `/fav download`, `/fav sync`, etc. |
 | `/files` | Browse archived files (paginated inline keyboard) |
 | `/help` | Display command reference |
 | `/status` | Show current Claude backend status |
@@ -162,6 +164,31 @@ Features:
 - Supports IMAP IDLE for real-time push (except QQ Mail)
 
 See `email_credentials.json` for account configuration format.
+
+## Bilibili favorites monitor
+
+Auto-download videos from monitored Bilibili favorites folders. Requires `bilibili_fav_enabled: true` in `config.json` and a valid Bilibili cookie (shared with `/dl` video downloads).
+
+| Command | Action |
+|---------|--------|
+| `/fav` | Show monitor status |
+| `/fav folders` | List all your Bilibili favorites folders (with IDs) |
+| `/fav list` | List currently monitored folders |
+| `/fav add <ID>` | Add folder to monitoring (existing videos marked as known) |
+| `/fav remove <ID>` | Remove folder from monitoring |
+| `/fav download <ID>` | Queue all videos in folder for download |
+| `/fav check` | Trigger immediate check for new videos |
+| `/fav sync` | Sync all local files to NAS |
+| `/fav queue` | View download queue (current + pending) |
+| `/fav pause` / `/fav resume` | Pause/resume monitoring |
+| `/fav history [N]` | Recent download history |
+
+Features:
+- Polls favorites folders at configurable intervals (default 5 minutes)
+- Persistent download queue — survives bot restarts
+- Per-folder subdirectories (named after folder title)
+- Optional NAS sync via rsync — automatically syncs after download and deletes local files; unsynced files from previous sessions are synced on startup
+- Downloads use existing Bilibili VIP cookie for best quality
 
 ## Configuration
 

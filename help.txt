@@ -34,6 +34,19 @@
   B站：4K/HDR 优先，需 cookie 解锁大会员画质
   &lt;50MB 自动上传，≥50MB 返回本地路径
 
+<b>B站收藏夹监控</b>
+  <code>/fav</code> — 查看监控状态
+  <code>/fav folders</code> — 列出所有收藏夹（含 ID）
+  <code>/fav list</code> — 查看监控中的收藏夹
+  <code>/fav add ID</code> — 添加收藏夹到监控
+  <code>/fav remove ID</code> — 移除监控
+  <code>/fav download ID</code> — 全量下载收藏夹
+  <code>/fav check</code> — 立即检查新视频
+  <code>/fav sync</code> — 同步本地文件到 NAS
+  <code>/fav queue</code> — 查看下载队列
+  <code>/fav pause</code> / <code>/fav resume</code> — 暂停/恢复
+  <code>/fav history</code> — 最近下载记录
+
 <b>媒体</b>
   发送图片/视频/文件 → 自动存档到服务器
   发送图片 + caption → Claude 识图（仅 api backend）

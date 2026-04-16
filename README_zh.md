@@ -12,6 +12,7 @@
 - **特权 Claude** — 发送 `$<文本>` 使用拥有完整 Shell 和文件访问权限的 AI 助手，执行命令前需交互确认
 - **视频下载** — 发送 `/dl <链接>` 下载抖音（无水印）、B站（4K/HDR）、YouTube 及其他 yt-dlp 支持的平台视频
 - **邮件监控** — 基于 IMAP 的邮件监控，AI 智能分类（紧急/普通/垃圾），定时生成摘要报告
+- **B站收藏夹监控** — 自动下载监控的 B站收藏夹中新增视频，支持持久化队列和 NAS rsync 同步
 - **图片识别** — 发送图片附带文字说明，Claude 会分析图片内容（仅 API 后端）
 - **预设回复** — 配置固定的关键词 → 回复对
 - **媒体归档** — 转发图片/视频/文档给机器人，自动保存到服务器；使用 `/files` 浏览归档
@@ -59,6 +60,7 @@ python3 bot.py
 | `$$部署应用` | 特权 Claude — 自动批准所有命令（免确认） |
 | `/dl <链接>` | 下载抖音、B站、YouTube 等平台视频 |
 | `/email` | 邮件监控状态；`/email digest`、`/email check` 等 |
+| `/fav` | B站收藏夹监控；`/fav folders`、`/fav add`、`/fav download`、`/fav sync` 等 |
 | `/files` | 浏览归档文件（分页 inline keyboard） |
 | `/help` | 显示命令帮助 |
 | `/status` | 查看当前 Claude 后端状态 |
@@ -162,6 +164,31 @@ $whitelist remove <序号>     — 按序号删除
 - 支持 IMAP IDLE 实时推送（QQ 邮箱除外）
 
 账号配置格式参见 `email_credentials.json`。
+
+## B站收藏夹监控
+
+自动下载监控的 B站收藏夹中新增视频。需要在 `config.json` 中设置 `bilibili_fav_enabled: true`，并确保 B站 Cookie 有效（与 `/dl` 视频下载共用）。
+
+| 命令 | 动作 |
+|------|------|
+| `/fav` | 查看监控状态 |
+| `/fav folders` | 列出所有 B站收藏夹（含 ID） |
+| `/fav list` | 查看当前监控中的收藏夹 |
+| `/fav add <ID>` | 添加收藏夹监控（现有视频标记为已知） |
+| `/fav remove <ID>` | 移除收藏夹监控 |
+| `/fav download <ID>` | 全量下载收藏夹所有视频 |
+| `/fav check` | 立即检查新视频 |
+| `/fav sync` | 同步本地文件到 NAS |
+| `/fav queue` | 查看下载队列（当前 + 等待） |
+| `/fav pause` / `/fav resume` | 暂停/恢复监控 |
+| `/fav history [N]` | 最近下载记录 |
+
+功能特点：
+- 可配置轮询间隔（默认 5 分钟）自动检测新增视频
+- 持久化下载队列 — 重启后自动恢复
+- 按收藏夹名称分子文件夹存放
+- 可选 NAS 同步（rsync） — 下载后自动同步并删除本地文件；启动时自动补同步之前未同步的文件
+- 使用已有的 B站大会员 Cookie 下载最高画质
 
 ## 配置
 

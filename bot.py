@@ -23,8 +23,9 @@ from pathlib import Path
 
 import debug_bus
 from handlers import (
-    ClaudeHandler, EmailMonitorHandler, FileArchiveHandler, MediaArchiveHandler,
-    PresetHandler, PrivilegedClaudeHandler, ShellHandler, VideoDownloadHandler,
+    BilibiliFavMonitorHandler, ClaudeHandler, EmailMonitorHandler,
+    FileArchiveHandler, MediaArchiveHandler, PresetHandler,
+    PrivilegedClaudeHandler, ShellHandler, VideoDownloadHandler,
 )
 from notify_server import run_notify_server
 from router import Router
@@ -183,6 +184,30 @@ def main():
             shutdown_event=_shutdown_event,
         )
 
+    # Bilibili favorites monitor (optional, disabled by default)
+    bilibili_fav_handler = None
+    if config.get("bilibili_fav_enabled", False):
+        fav_state_path = config.get("bilibili_fav_state_path", "bilibili_fav_state.json")
+        if not os.path.isabs(fav_state_path):
+            fav_state_path = str(BASE_DIR / fav_state_path)
+        fav_download_dir = config.get("bilibili_fav_download_dir", "video_downloads/bilibili_fav")
+        if not os.path.isabs(fav_download_dir):
+            fav_download_dir = str(BASE_DIR / fav_download_dir)
+        bilibili_fav_handler = BilibiliFavMonitorHandler(
+            cookies_path=config.get("video_download_cookies_bilibili", ""),
+            state_path=fav_state_path,
+            download_dir=fav_download_dir,
+            download_timeout=config.get("bilibili_fav_download_timeout", 600),
+            check_interval=config.get("bilibili_fav_check_interval", 300),
+            initial_download_limit=config.get("bilibili_fav_initial_download_limit", 0),
+            proxy=config.get("proxy", ""),
+            nas_enabled=config.get("bilibili_fav_nas_enabled", False),
+            nas_host=config.get("bilibili_fav_nas_host", "nas"),
+            nas_dest_dir=config.get("bilibili_fav_nas_dest_dir", "/volume1/Share/BilibiliVideos"),
+            telegram_client=client,
+            shutdown_event=_shutdown_event,
+        )
+
     # Connect email monitor to Claude handlers for tool access
     if email_monitor_handler:
         claude_handler.set_email_monitor(email_monitor_handler)
@@ -194,7 +219,8 @@ def main():
                     privileged_claude_handler=privileged_claude_handler,
                     config_path=args.config,
                     video_download_handler=video_download_handler,
-                    email_monitor_handler=email_monitor_handler)
+                    email_monitor_handler=email_monitor_handler,
+                    bilibili_fav_handler=bilibili_fav_handler)
 
     # Start debug event server
     debug_bus.start(port=config.get("debug_port", 8766), shutdown_event=_shutdown_event)
@@ -221,6 +247,10 @@ def main():
     # Start email monitor if enabled
     if email_monitor_handler:
         email_monitor_handler.start()
+
+    # Start Bilibili favorites monitor if enabled
+    if bilibili_fav_handler:
+        bilibili_fav_handler.start()
 
     # Start Bilibili cookie auto-refresh scheduler
     bilibili_cookie_path = config.get("video_download_cookies_bilibili", "")

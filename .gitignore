@@ -9,6 +9,7 @@ __pycache__/
 .claude
 email_credentials.json
 email_state.json
+bilibili_fav_state.json
 telegram_archive/
 video_downloads/
 telegram-bot-api-data/

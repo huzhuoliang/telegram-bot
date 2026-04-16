@@ -7,6 +7,7 @@ from handlers.preset import PresetHandler
 from handlers.media_archive import MediaArchiveHandler, FileArchiveHandler
 from handlers.video_download import VideoDownloadHandler
 from handlers.email_monitor import EmailMonitorHandler
+from handlers.bilibili_fav_monitor import BilibiliFavMonitorHandler
 
 __all__ = [
     "ShellHandler",
@@ -17,4 +18,5 @@ __all__ = [
     "FileArchiveHandler",
     "VideoDownloadHandler",
     "EmailMonitorHandler",
+    "BilibiliFavMonitorHandler",
 ]
