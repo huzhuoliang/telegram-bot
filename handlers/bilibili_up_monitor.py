@@ -321,9 +321,9 @@ class BilibiliUpMonitorHandler:
             )
 
         # Fetch ALL videos
-        all_videos = self._api_fetch_all_up_videos(int(mid_str))
+        all_videos, complete = self._api_fetch_all_up_videos(int(mid_str))
         if not all_videos:
-            return "该UP主没有可下载的视频。"
+            return "该UP主没有可下载的视频，或 API 请求失败（可稍后重试）。"
 
         # Collect bvids already in queue to avoid duplicates
         with self._queue.mutex:
@@ -357,10 +357,13 @@ class BilibiliUpMonitorHandler:
                 count += 1
             self._save_state()
 
+        warn = ""
+        if not complete:
+            warn = "\n⚠ 分页中断（B站限流），未获取完整列表。稍后请再次运行此命令补齐。"
         return (
             f"UP主 <b>{html.escape(up_name)}</b> 全量下载已启动\n"
             f"有效视频: {len(all_videos)}，新加入队列: {count}，"
-            f"跳过（已在队列/已下载）: {len(all_videos) - count}"
+            f"跳过（已在队列/已下载）: {len(all_videos) - count}{warn}"
         )
 
     def _cmd_check(self) -> str:
@@ -956,10 +959,12 @@ class BilibiliUpMonitorHandler:
         filtered["w_rid"] = w_rid
         return filtered
 
-    def _api_fetch_up_videos(self, mid: int, pn: int = 1, ps: int = 30) -> list[dict]:
+    def _api_fetch_up_videos(self, mid: int, pn: int = 1, ps: int = 30, raise_on_error: bool = False) -> list[dict]:
         """Fetch one page of an UP's video list (sorted by pubdate, newest first).
 
         Retries once on 412 (rate limit) with a short backoff.
+        If raise_on_error is True, raises RuntimeError on failure instead of returning []
+        (used by pagination to distinguish "end of list" from "request failed").
         """
         cookie = self._build_cookie_header()
 
@@ -990,6 +995,8 @@ class BilibiliUpMonitorHandler:
                     return vlist
                 else:
                     logger.warning("UP video API returned code=%s for mid=%d", data.get("code"), mid)
+                    if raise_on_error:
+                        raise RuntimeError(f"API returned code={data.get('code')}")
                     return []
             except urllib.error.HTTPError as e:
                 if e.code == 412 and attempt == 0:
@@ -997,28 +1004,68 @@ class BilibiliUpMonitorHandler:
                     time.sleep(2)
                     continue
                 logger.warning("Failed to fetch UP videos (mid=%d, pn=%d): %s", mid, pn, e)
+                if raise_on_error:
+                    raise RuntimeError(f"HTTP {e.code}") from e
+            except RuntimeError:
+                raise
             except Exception as e:
                 logger.warning("Failed to fetch UP videos (mid=%d, pn=%d): %s", mid, pn, e)
+                if raise_on_error:
+                    raise RuntimeError(str(e)) from e
                 break
         return []
 
-    def _api_fetch_all_up_videos(self, mid: int) -> list[dict]:
-        """Fetch ALL videos from an UP (paginated). Used for full download."""
+    def _api_fetch_up_videos_with_retry(self, mid: int, pn: int, ps: int = 30,
+                                         max_retries: int = 5) -> list[dict]:
+        """Fetch one page with aggressive retry on failure. Used by full-download pagination.
+
+        Returns [] only when the page is truly empty (end of list).
+        Raises RuntimeError after exhausting retries.
+        """
+        backoff = 5
+        for attempt in range(max_retries):
+            try:
+                videos = self._api_fetch_up_videos(mid, pn=pn, ps=ps, raise_on_error=True)
+                return videos
+            except RuntimeError as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.info("Page fetch failed (mid=%d pn=%d attempt=%d): %s, retrying in %ds",
+                            mid, pn, attempt + 1, e, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+        return []
+
+    def _api_fetch_all_up_videos(self, mid: int) -> tuple[list[dict], bool]:
+        """Fetch ALL videos from an UP (paginated). Used for full download.
+
+        Returns (videos, complete) where complete=True only if pagination
+        finished cleanly. complete=False means some pages failed even after retries
+        (partial list returned).
+        """
         all_videos = []
         pn = 1
+        complete = True
         while True:
             if self._shutdown_event.is_set():
+                complete = False
                 break
-            videos = self._api_fetch_up_videos(mid, pn=pn, ps=30)
+            try:
+                videos = self._api_fetch_up_videos_with_retry(mid, pn=pn, ps=30)
+            except RuntimeError as e:
+                logger.error("Pagination failed at page %d for mid=%d: %s", pn, mid, e)
+                complete = False
+                break
             if not videos:
+                # True end of list (empty response)
                 break
             all_videos.extend(videos)
             if len(videos) < 30:
                 break
             pn += 1
             # Rate limit courtesy
-            time.sleep(0.5)
-        return all_videos
+            time.sleep(1)
+        return all_videos, complete
 
     # ------------------------------------------------------------------
     # State persistence
