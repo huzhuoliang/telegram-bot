@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import debug_bus
+from bilibili_archive import verify_nas_file
 from bilibili_cookies import USER_AGENT, _parse_cookie_value, check_cookie_valid
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,9 @@ class BilibiliFavMonitorHandler:
         nas_dest_dir: str = "/volume1/Share/BilibiliVideos",
         telegram_client=None,
         shutdown_event: threading.Event | None = None,
+        archive=None,
     ):
+        self._archive = archive
         self._cookies_path = Path(cookies_path).expanduser() if cookies_path else None
         self._state_path = Path(state_path)
         self._download_dir = Path(download_dir)
@@ -61,6 +64,7 @@ class BilibiliFavMonitorHandler:
         self._paused = threading.Event()  # set = paused
         self._check_now_event = threading.Event()
         self._queue: queue.Queue[dict] = queue.Queue()
+        self._redo_queue: queue.Queue[dict] = queue.Queue()  # fast-track queue for /fav redo
         self._current_download: dict | None = None
 
         # Cached user mid
@@ -138,6 +142,10 @@ class BilibiliFavMonitorHandler:
             result = self._cmd_queue()
         elif sub_lower.startswith("download "):
             result = self._cmd_download(sub[9:].strip())
+        elif sub_lower.startswith("redo "):
+            result = self._cmd_redo(sub[5:].strip())
+        elif sub_lower == "clear_queue":
+            result = self._cmd_clear_queue()
         elif sub_lower == "sync":
             result = self._cmd_sync()
         elif sub_lower.startswith("history"):
@@ -150,7 +158,10 @@ class BilibiliFavMonitorHandler:
                 "<code>/fav list</code> — 查看监控中的收藏夹\n"
                 "<code>/fav add &lt;ID&gt;</code> — 添加收藏夹监控\n"
                 "<code>/fav remove &lt;ID&gt;</code> — 移除收藏夹监控\n"
-                "<code>/fav download &lt;ID&gt;</code> — 全量下载收藏夹\n"
+                "<code>/fav download &lt;ID&gt;</code> — 下载收藏夹缺失视频\n"
+                "<code>/fav download &lt;ID&gt; --force</code> — 强制重新下载全部\n"
+                "<code>/fav redo &lt;BV号&gt;</code> — 强制重新下载单个视频（快速通道）\n"
+                "<code>/fav clear_queue</code> — 清空下载队列（不中断当前下载）\n"
                 "<code>/fav check</code> — 立即检查\n"
                 "<code>/fav sync</code> — 同步本地文件到 NAS\n"
                 "<code>/fav pause</code> — 暂停监控\n"
@@ -303,9 +314,13 @@ class BilibiliFavMonitorHandler:
         return f"已移除收藏夹监控: <b>{html.escape(title)}</b> (ID: {media_id})"
 
     def _cmd_download(self, arg: str) -> str:
-        media_id = arg.strip()
-        if not media_id.isdigit():
-            return "用法: <code>/fav download &lt;收藏夹ID&gt;</code>"
+        # Parse --force flag
+        parts = arg.strip().split()
+        force = "--force" in parts
+        parts = [p for p in parts if p != "--force"]
+        if not parts or not parts[0].isdigit():
+            return "用法: <code>/fav download &lt;收藏夹ID&gt; [--force]</code>\n默认只下载缺失的视频；<code>--force</code> 强制重新下载全部。"
+        media_id = parts[0]
 
         # Determine folder title — check monitored folders first, else query API
         with self._state_lock:
@@ -339,19 +354,28 @@ class BilibiliFavMonitorHandler:
             queued_bvids.add(cur["bvid"])
 
         count = 0
+        skipped_downloaded = 0
+        skipped_archived = 0
         with self._state_lock:
             known = set(self._state["downloaded_bvids"])
             for it in reversed(valid):  # oldest first into queue
                 bvid = it["bvid"]
                 if bvid in queued_bvids:
                     continue
-                # Remove from known so downloader will process it
+                # Archive check (fast in-memory; NAS verification still done at download time)
+                if not force and self._archive is not None and self._archive.has(bvid):
+                    skipped_archived += 1
+                    continue
                 if bvid in known:
-                    try:
-                        self._state["downloaded_bvids"].remove(bvid)
-                    except ValueError:
-                        pass
-                    known.discard(bvid)
+                    if force:
+                        try:
+                            self._state["downloaded_bvids"].remove(bvid)
+                        except ValueError:
+                            pass
+                        known.discard(bvid)
+                    else:
+                        skipped_downloaded += 1
+                        continue
                 task = {
                     "bvid": bvid,
                     "title": it["title"],
@@ -363,10 +387,91 @@ class BilibiliFavMonitorHandler:
                 count += 1
             self._save_state()
 
+        mode_text = "强制重下" if force else "只下载缺失"
+        skipped_queue = len(valid) - count - skipped_downloaded - skipped_archived
         return (
-            f"收藏夹 <b>{html.escape(fav_title)}</b> 全量下载已启动\n"
-            f"有效视频: {len(valid)}，新加入队列: {count}，"
-            f"跳过（已在队列/已下载）: {len(valid) - count}"
+            f"收藏夹 <b>{html.escape(fav_title)}</b> 全量下载已启动（模式: {mode_text}）\n"
+            f"有效视频: {len(valid)}，新加入队列: {count}\n"
+            f"跳过（已归档）: {skipped_archived}，"
+            f"跳过（已下载）: {skipped_downloaded}，"
+            f"跳过（已在队列）: {skipped_queue}"
+        )
+
+    def _cmd_redo(self, arg: str) -> str:
+        bvid = arg.strip()
+        if not re.match(r'^BV[a-zA-Z0-9]+$', bvid):
+            return "用法: <code>/fav redo &lt;BV号&gt;</code>"
+
+        # Determine fav info: prefer archive, then download_history
+        fav_id = ""
+        fav_title = ""
+        title = bvid
+        arch = self._archive.get(bvid) if self._archive else None
+        if arch and arch.get("source_type") == "fav":
+            fav_id = arch.get("source_id", "")
+            fav_title = arch.get("source_name", "")
+            title = arch.get("title", bvid)
+        else:
+            with self._state_lock:
+                for entry in reversed(self._state["download_history"]):
+                    if entry.get("bvid") == bvid:
+                        fav_id = entry.get("fav_id", "")
+                        fav_title = entry.get("fav_title", "")
+                        title = entry.get("title", bvid)
+                        break
+
+        if not fav_title:
+            return (
+                f"BV {bvid} 未找到归档或历史记录，无法确定所属收藏夹。\n"
+                f"如果该视频不属于监控的收藏夹，请使用 <code>/dl</code> 命令单独下载。"
+            )
+
+        # Remove from archive and downloaded_bvids to force re-download
+        if self._archive:
+            self._archive.remove(bvid)
+        with self._state_lock:
+            bvids = self._state["downloaded_bvids"]
+            if bvid in bvids:
+                bvids.remove(bvid)
+            self._save_state()
+
+        task = {
+            "bvid": bvid,
+            "title": title,
+            "fav_id": fav_id,
+            "fav_title": fav_title,
+        }
+        self._redo_queue.put(task)
+        return (
+            f"已加入强制重下快速通道: <b>{html.escape(title)}</b>\n"
+            f"BV号: <code>{bvid}</code>\n"
+            f"收藏夹: {html.escape(fav_title)}"
+        )
+
+    def _cmd_clear_queue(self) -> str:
+        # Drain in-memory main queue (redo queue preserved)
+        drained = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+                drained += 1
+            except queue.Empty:
+                break
+        # Clear persistent pending_queue
+        with self._state_lock:
+            persisted = len(self._state["pending_queue"])
+            self._state["pending_queue"] = []
+            self._save_state()
+        cur = self._current_download
+        note = ""
+        if cur:
+            note = f"\n当前正在下载的视频不会中断：{html.escape(cur.get('title', ''))}"
+        return (
+            f"<b>已清空收藏夹下载队列</b>\n"
+            f"内存队列: 取消 {drained} 个\n"
+            f"持久化队列: 清除 {persisted} 个\n"
+            f"快速通道（redo）未受影响。{note}"
         )
 
     def _cmd_check(self) -> str:
@@ -398,12 +503,19 @@ class BilibiliFavMonitorHandler:
         # Snapshot queue contents
         with self._queue.mutex:
             pending = list(self._queue.queue)
+        with self._redo_queue.mutex:
+            redo_pending = list(self._redo_queue.queue)
 
         lines = ["<b>下载队列</b>\n"]
         if cur:
             lines.append(f"正在下载:\n  {html.escape(cur['title'])} (<code>{cur['bvid']}</code>)")
         else:
             lines.append("正在下载: 无")
+
+        if redo_pending:
+            lines.append(f"\n快速通道 ({len(redo_pending)}):")
+            for i, item in enumerate(redo_pending[:10], 1):
+                lines.append(f"  {i}. {html.escape(item['title'][:50])} (<code>{item['bvid']}</code>)")
 
         if pending:
             lines.append(f"\n等待中 ({len(pending)}):")
@@ -563,10 +675,17 @@ class BilibiliFavMonitorHandler:
                 logger.warning("Startup NAS sync error: %s", e)
 
         while not self._shutdown_event.is_set():
+            # Prefer fast-track (redo) tasks before the main queue
+            task = None
+            is_redo = False
             try:
-                task = self._queue.get(timeout=5)
+                task = self._redo_queue.get_nowait()
+                is_redo = True
             except queue.Empty:
-                continue
+                try:
+                    task = self._queue.get(timeout=5)
+                except queue.Empty:
+                    continue
 
             # Handle sentinel tasks
             if task.get("_action") == "sync_all":
@@ -574,22 +693,58 @@ class BilibiliFavMonitorHandler:
                     self._sync_all_pending()
                 except Exception as e:
                     logger.warning("NAS sync error: %s", e)
-                self._queue.task_done()
+                if is_redo:
+                    self._redo_queue.task_done()
+                else:
+                    self._queue.task_done()
                 continue
 
+            bvid = task["bvid"]
+
+            # Archive check: if already archived AND file verified, skip.
+            # Redo tasks bypass the archive check.
+            if not is_redo and self._archive is not None:
+                arch = self._archive.get(bvid)
+                if arch:
+                    on_nas = arch.get("on_nas", False)
+                    path = arch.get("path", "")
+                    verified = False
+                    if on_nas and path and self._nas_enabled:
+                        verified = verify_nas_file(self._nas_host, path)
+                    elif not on_nas and path:
+                        verified = Path(path).exists()
+                    if verified:
+                        logger.info("Archived already, skipping: %s (%s)", bvid, path)
+                        with self._state_lock:
+                            pq = self._state["pending_queue"]
+                            for i, item in enumerate(pq):
+                                if item["bvid"] == bvid:
+                                    pq.pop(i)
+                                    break
+                            if bvid not in set(self._state["downloaded_bvids"]):
+                                self._state["downloaded_bvids"].append(bvid)
+                                self._trim_bvids()
+                            self._save_state()
+                        self._queue.task_done()
+                        continue
+                    else:
+                        logger.warning("Archive entry for %s points to missing file, re-downloading", bvid)
+                        self._archive.remove(bvid)
+
             # Skip if already downloaded (prevents re-download after crash during record)
-            with self._state_lock:
-                already = task["bvid"] in set(self._state["downloaded_bvids"])
-            if already:
+            if not is_redo:
                 with self._state_lock:
-                    pq = self._state["pending_queue"]
-                    for i, item in enumerate(pq):
-                        if item["bvid"] == task["bvid"]:
-                            pq.pop(i)
-                            break
-                    self._save_state()
-                self._queue.task_done()
-                continue
+                    already = bvid in set(self._state["downloaded_bvids"])
+                if already:
+                    with self._state_lock:
+                        pq = self._state["pending_queue"]
+                        for i, item in enumerate(pq):
+                            if item["bvid"] == bvid:
+                                pq.pop(i)
+                                break
+                        self._save_state()
+                    self._queue.task_done()
+                    continue
 
             self._current_download = task
             try:
@@ -599,17 +754,20 @@ class BilibiliFavMonitorHandler:
                 self._record_history(task, "failed", str(e))
                 self._notify_failure(task, str(e))
             finally:
-                # Remove from persistent queue only after download attempt finishes
-                # (so mid-download restarts will re-queue the task from state)
-                with self._state_lock:
-                    pq = self._state["pending_queue"]
-                    for i, item in enumerate(pq):
-                        if item["bvid"] == task["bvid"]:
-                            pq.pop(i)
-                            break
-                    self._save_state()
+                # Redo tasks are not tracked in persistent pending_queue.
+                if not is_redo:
+                    with self._state_lock:
+                        pq = self._state["pending_queue"]
+                        for i, item in enumerate(pq):
+                            if item["bvid"] == task["bvid"]:
+                                pq.pop(i)
+                                break
+                        self._save_state()
                 self._current_download = None
-                self._queue.task_done()
+                if is_redo:
+                    self._redo_queue.task_done()
+                else:
+                    self._queue.task_done()
 
         logger.info("Fav downloader thread stopped")
 
@@ -673,9 +831,24 @@ class BilibiliFavMonitorHandler:
 
         # NAS sync
         nas_status = ""
+        nas_ok = False
         if self._nas_enabled and filepath:
             nas_ok = self._sync_to_nas(filepath, safe_folder)
             nas_status = "\nNAS: 已同步" if nas_ok else "\nNAS: 同步失败"
+
+        # Archive entry — record final path (NAS if synced, else local)
+        if self._archive is not None and filepath:
+            final_path = filepath
+            if self._nas_enabled and nas_ok:
+                final_path = f"{self._nas_dest_dir}/{safe_folder}/{Path(filepath).name}"
+            self._archive.add(bvid, {
+                "path": final_path,
+                "title": title,
+                "source_type": "fav",
+                "source_id": task.get("fav_id", ""),
+                "source_name": fav_title,
+                "on_nas": bool(self._nas_enabled and nas_ok),
+            })
 
         self._record_history(task, "success")
         self._notify_success(task, filepath, nas_status)

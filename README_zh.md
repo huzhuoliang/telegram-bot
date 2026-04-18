@@ -14,6 +14,7 @@
 - **邮件监控** — 基于 IMAP 的邮件监控，AI 智能分类（紧急/普通/垃圾），定时生成摘要报告
 - **B站收藏夹监控** — 自动下载监控的 B站收藏夹中新增视频，支持持久化队列和 NAS rsync 同步
 - **B站UP主监控** — 监控指定 B站 UP主 的新视频上传，支持仅通知或自动下载模式，WBI 签名 API，持久化队列和 NAS 同步
+- **B站归档** — 共享持久归档（BV 号 → NAS 路径）通过 SSH 校验跳过已下载视频；`/<handler> redo <BV>` 快速通道命令用于重下损坏或缺失的视频
 - **图片识别** — 发送图片附带文字说明，Claude 会分析图片内容（仅 API 后端）
 - **预设回复** — 配置固定的关键词 → 回复对
 - **媒体归档** — 转发图片/视频/文档给机器人，自动保存到服务器；使用 `/files` 浏览归档
@@ -178,7 +179,10 @@ $whitelist remove <序号>     — 按序号删除
 | `/fav list` | 查看当前监控中的收藏夹 |
 | `/fav add <ID>` | 添加收藏夹监控（现有视频标记为已知） |
 | `/fav remove <ID>` | 移除收藏夹监控 |
-| `/fav download <ID>` | 全量下载收藏夹所有视频 |
+| `/fav download <ID>` | 下载收藏夹缺失视频（跳过已归档和已下载） |
+| `/fav download <ID> --force` | 强制重新下载该收藏夹的所有视频 |
+| `/fav redo <BV>` | 强制重新下载单个视频（快速通道） |
+| `/fav clear_queue` | 清空下载队列（正在下载的不中断） |
 | `/fav check` | 立即检查新视频 |
 | `/fav sync` | 同步本地文件到 NAS |
 | `/fav queue` | 查看下载队列（当前 + 等待） |
@@ -206,6 +210,9 @@ $whitelist remove <序号>     — 按序号删除
 | `/up mode <UID> notify/download` | 切换通知/下载模式 |
 | `/up download <UID>` | 下载该 UP主 缺失的视频（跳过已下载） |
 | `/up download <UID> --force` | 强制重新下载该 UP主 的所有视频 |
+| `/up redo <BV>` | 强制重新下载单个视频（快速通道） |
+| `/up rebuild_archive` | 扫描 NAS 重建共享归档索引 |
+| `/up clear_queue` | 清空下载队列（正在下载的不中断） |
 | `/up check` | 立即检查新视频 |
 | `/up sync` | 同步本地文件到 NAS |
 | `/up queue` | 查看下载队列（当前 + 等待） |

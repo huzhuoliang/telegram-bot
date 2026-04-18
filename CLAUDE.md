@@ -220,6 +220,7 @@ telegram_archive/
 | `bilibili_up_check_interval` | `300` | Seconds between UP video poll cycles |
 | `bilibili_up_download_dir` | `"video_downloads/bilibili_up"` | Download directory for UP videos |
 | `bilibili_up_download_timeout` | `600` | Per-video download timeout in seconds |
+| `bilibili_archive_path` | `"bilibili_archive.json"` | Shared archive of BV → final path (skips already-downloaded videos) |
 | `email_enabled` | `false` | Enable email monitor |
 | `email_credentials_path` | `"email_credentials.json"` | Path to IMAP/SMTP credentials file |
 | `email_state_path` | `"email_state.json"` | Path to processed email state file |
@@ -298,7 +299,10 @@ Polls Bilibili favorites folders for newly added videos, auto-downloads via yt-d
 | `/fav list` | List currently monitored folders |
 | `/fav add <media_id>` | Add folder to monitoring (seeds existing videos as known) |
 | `/fav remove <media_id>` | Remove folder from monitoring |
-| `/fav download <media_id>` | Queue all videos in folder for download |
+| `/fav download <media_id>` | Queue missing videos from folder (skips already-archived and already-downloaded) |
+| `/fav download <media_id> --force` | Force re-download all videos from folder |
+| `/fav redo <BV>` | Force re-download a single video via fast-track queue |
+| `/fav clear_queue` | Empty the main download queue (in-memory + persistent); current download and redo queue preserved |
 | `/fav check` | Trigger immediate check |
 | `/fav sync` | Sync all local files to NAS |
 | `/fav queue` | View download queue (current + pending) |
@@ -350,6 +354,9 @@ Monitors specified Bilibili uploaders (UP主) for new video uploads, sends Teleg
 | `/up mode <UID> notify/download` | Switch mode for an UP |
 | `/up download <UID>` | Queue missing videos from UP for download (skips already downloaded) |
 | `/up download <UID> --force` | Force re-download all videos from UP (ignores existing downloads) |
+| `/up redo <BV>` | Force re-download a single video via fast-track queue |
+| `/up rebuild_archive` | Scan NAS directory and rebuild the shared archive from filenames |
+| `/up clear_queue` | Empty the main download queue (in-memory + persistent); current download and redo queue preserved |
 | `/up check` | Trigger immediate check |
 | `/up sync` | Sync all local files to NAS |
 | `/up queue` | View download queue (current + pending) |
@@ -367,6 +374,17 @@ video_downloads/bilibili_up/
 ```
 
 **NAS sync:** Reuses `bilibili_fav_nas_*` configuration. UP videos sync to the same NAS base path in per-UP-name subdirectories.
+
+## Bilibili archive (bilibili_archive.py)
+
+Shared persistent archive between fav and UP monitors. Maps BV → `{path, title, source_type, source_id, source_name, archived_at, on_nas}`.
+
+**Purpose:**
+- Skip downloads of already-archived videos (downloader checks archive + verifies NAS file via SSH before starting)
+- Back the `/fav redo <BV>` and `/up redo <BV>` commands (they remove the BV from archive and re-queue on a fast-track queue that the downloader drains before the main queue)
+- Survive the rolling-window limit of `downloaded_bvids` (permanent record vs 5000 rolling)
+
+**SSH verification:** Enable SSH `ControlMaster` in `~/.ssh/config` so the repeated `ssh nas 'test -f ...'` checks reuse a persistent connection (sub-50ms per check instead of ~500ms per new connection).
 
 ## Douyin video download (TikTokDownloader)
 

@@ -40,7 +40,10 @@
   <code>/fav list</code> — 查看监控中的收藏夹
   <code>/fav add ID</code> — 添加收藏夹到监控
   <code>/fav remove ID</code> — 移除监控
-  <code>/fav download ID</code> — 全量下载收藏夹
+  <code>/fav download ID</code> — 下载收藏夹缺失视频
+  <code>/fav download ID --force</code> — 强制重新下载全部
+  <code>/fav redo BV号</code> — 强制重新下载单个视频（快速通道）
+  <code>/fav clear_queue</code> — 清空下载队列（不中断当前下载）
   <code>/fav check</code> — 立即检查新视频
   <code>/fav sync</code> — 同步本地文件到 NAS
   <code>/fav queue</code> — 查看下载队列
@@ -56,6 +59,9 @@
   <code>/up mode UID notify/download</code> — 切换通知/下载模式
   <code>/up download UID</code> — 下载UP主缺失视频（跳过已下载）
   <code>/up download UID --force</code> — 强制重新下载全部
+  <code>/up redo BV号</code> — 强制重新下载单个视频（快速通道）
+  <code>/up rebuild_archive</code> — 从 NAS 重建归档索引
+  <code>/up clear_queue</code> — 清空下载队列（不中断当前下载）
   <code>/up check</code> — 立即检查新视频
   <code>/up sync</code> — 同步本地文件到 NAS
   <code>/up queue</code> — 查看下载队列

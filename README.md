@@ -14,6 +14,7 @@ Personal Telegram bot service. Runs on your server, polls Telegram for messages,
 - **Email monitor** — IMAP-based email monitoring with AI-powered classification (urgent/normal/spam) and periodic digest reports
 - **Bilibili favorites monitor** — auto-download videos from monitored Bilibili favorites folders, with persistent queue and optional NAS sync via rsync
 - **Bilibili UP monitor** — monitor Bilibili uploaders for new video uploads with notification-only or auto-download mode, WBI-signed API, persistent queue and NAS sync
+- **Bilibili archive** — shared persistent archive (BV → NAS path) skips already-downloaded videos with SSH verification; `/<handler> redo <BV>` fast-track command for re-downloading corrupted or deleted files
 - **Image recognition** — send a photo with a caption to get Claude's analysis (API backend only)
 - **Preset replies** — configure fixed keyword → response pairs
 - **Media archive** — forward photos/videos/documents to the bot and they are saved to the server automatically; browse with `/files`
@@ -178,7 +179,10 @@ Auto-download videos from monitored Bilibili favorites folders. Requires `bilibi
 | `/fav list` | List currently monitored folders |
 | `/fav add <ID>` | Add folder to monitoring (existing videos marked as known) |
 | `/fav remove <ID>` | Remove folder from monitoring |
-| `/fav download <ID>` | Queue all videos in folder for download |
+| `/fav download <ID>` | Queue missing videos from folder (skips archived + downloaded) |
+| `/fav download <ID> --force` | Force re-download all videos from folder |
+| `/fav redo <BV>` | Force re-download a single video (fast-track queue) |
+| `/fav clear_queue` | Empty the main download queue (current download not interrupted) |
 | `/fav check` | Trigger immediate check for new videos |
 | `/fav sync` | Sync all local files to NAS |
 | `/fav queue` | View download queue (current + pending) |
@@ -206,6 +210,9 @@ Monitor Bilibili uploaders (UP主) for new video uploads. Requires `bilibili_up_
 | `/up mode <UID> notify/download` | Switch mode for an uploader |
 | `/up download <UID>` | Queue missing videos from uploader (skips already downloaded) |
 | `/up download <UID> --force` | Force re-download all videos from uploader |
+| `/up redo <BV>` | Force re-download a single video (fast-track queue) |
+| `/up rebuild_archive` | Scan NAS and rebuild the shared archive from filenames |
+| `/up clear_queue` | Empty the main download queue (current download not interrupted) |
 | `/up check` | Trigger immediate check for new videos |
 | `/up sync` | Sync all local files to NAS |
 | `/up queue` | View download queue (current + pending) |

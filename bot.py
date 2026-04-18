@@ -185,6 +185,16 @@ def main():
             shutdown_event=_shutdown_event,
         )
 
+    # Bilibili archive (shared between fav and UP monitors)
+    bilibili_archive = None
+    archive_path = config.get("bilibili_archive_path", "bilibili_archive.json")
+    if not os.path.isabs(archive_path):
+        archive_path = str(BASE_DIR / archive_path)
+    if config.get("bilibili_fav_enabled", False) or config.get("bilibili_up_enabled", False):
+        from bilibili_archive import BilibiliArchive
+        bilibili_archive = BilibiliArchive(archive_path)
+        logger.info("Bilibili archive loaded: %d entries", bilibili_archive.count())
+
     # Bilibili favorites monitor (optional, disabled by default)
     bilibili_fav_handler = None
     if config.get("bilibili_fav_enabled", False):
@@ -207,6 +217,7 @@ def main():
             nas_dest_dir=config.get("bilibili_fav_nas_dest_dir", "/volume1/Share/BilibiliVideos"),
             telegram_client=client,
             shutdown_event=_shutdown_event,
+            archive=bilibili_archive,
         )
 
     # Bilibili UP monitor (optional, disabled by default)
@@ -230,6 +241,7 @@ def main():
             nas_dest_dir=config.get("bilibili_fav_nas_dest_dir", "/volume1/Share/BilibiliVideos"),
             telegram_client=client,
             shutdown_event=_shutdown_event,
+            archive=bilibili_archive,
         )
 
     # Connect email monitor to Claude handlers for tool access

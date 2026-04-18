@@ -11,6 +11,7 @@ import logging
 import os
 import queue
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -21,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import debug_bus
+from bilibili_archive import verify_nas_file
 from bilibili_cookies import USER_AGENT, _parse_cookie_value, check_cookie_valid
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,9 @@ class BilibiliUpMonitorHandler:
         nas_dest_dir: str = "/volume1/Share/BilibiliVideos",
         telegram_client=None,
         shutdown_event: threading.Event | None = None,
+        archive=None,
     ):
+        self._archive = archive
         self._cookies_path = Path(cookies_path).expanduser() if cookies_path else None
         self._state_path = Path(state_path)
         self._download_dir = Path(download_dir)
@@ -69,6 +73,7 @@ class BilibiliUpMonitorHandler:
         self._paused = threading.Event()  # set = paused
         self._check_now_event = threading.Event()
         self._queue: queue.Queue[dict] = queue.Queue()
+        self._redo_queue: queue.Queue[dict] = queue.Queue()  # fast-track queue for /up redo
         self._current_download: dict | None = None
         self._current_activity: str = "idle"  # idle | startup_sync | downloading | nas_syncing
 
@@ -141,6 +146,12 @@ class BilibiliUpMonitorHandler:
             result = self._cmd_mode(sub[5:].strip())
         elif sub_lower.startswith("download "):
             result = self._cmd_download(sub[9:].strip())
+        elif sub_lower.startswith("redo "):
+            result = self._cmd_redo(sub[5:].strip())
+        elif sub_lower == "rebuild_archive":
+            result = self._cmd_rebuild_archive()
+        elif sub_lower == "clear_queue":
+            result = self._cmd_clear_queue()
         elif sub_lower == "check":
             result = self._cmd_check()
         elif sub_lower == "pause":
@@ -164,6 +175,9 @@ class BilibiliUpMonitorHandler:
                 "<code>/up mode &lt;UID&gt; notify/download</code> — 切换模式\n"
                 "<code>/up download &lt;UID&gt;</code> — 下载UP主缺失的视频\n"
                 "<code>/up download &lt;UID&gt; --force</code> — 强制重新下载全部\n"
+                "<code>/up redo &lt;BV号&gt;</code> — 强制重新下载单个视频（快速通道）\n"
+                "<code>/up rebuild_archive</code> — 从 NAS 重建归档索引\n"
+                "<code>/up clear_queue</code> — 清空下载队列（不中断当前下载）\n"
                 "<code>/up check</code> — 立即检查\n"
                 "<code>/up sync</code> — 同步本地文件到 NAS\n"
                 "<code>/up pause</code> — 暂停监控\n"
@@ -344,11 +358,16 @@ class BilibiliUpMonitorHandler:
 
         count = 0
         skipped_downloaded = 0
+        skipped_archived = 0
         with self._state_lock:
             known = set(self._state["downloaded_bvids"])
             for v in reversed(all_videos):  # oldest first into queue
                 bvid = v.get("bvid", "")
                 if not bvid or bvid in queued_bvids:
+                    continue
+                # Archive check (fast in-memory lookup; NAS verification still done at download time)
+                if not force and self._archive is not None and self._archive.has(bvid):
+                    skipped_archived += 1
                     continue
                 if bvid in known:
                     if force:
@@ -377,11 +396,169 @@ class BilibiliUpMonitorHandler:
         if not complete:
             warn = "\n⚠ 分页中断（B站限流），未获取完整列表。稍后请再次运行此命令补齐。"
         mode_text = "强制重下" if force else "只下载缺失"
+        skipped_queue = len(all_videos) - count - skipped_downloaded - skipped_archived
         return (
             f"UP主 <b>{html.escape(up_name)}</b> 全量下载已启动（模式: {mode_text}）\n"
             f"有效视频: {len(all_videos)}，新加入队列: {count}\n"
-            f"跳过（已在队列）: {len(all_videos) - count - skipped_downloaded}，"
-            f"跳过（已下载）: {skipped_downloaded}{warn}"
+            f"跳过（已归档）: {skipped_archived}，"
+            f"跳过（已下载）: {skipped_downloaded}，"
+            f"跳过（已在队列）: {skipped_queue}{warn}"
+        )
+
+    def _cmd_redo(self, arg: str) -> str:
+        bvid = arg.strip()
+        if not re.match(r'^BV[a-zA-Z0-9]+$', bvid):
+            return "用法: <code>/up redo &lt;BV号&gt;</code>"
+
+        # Determine UP info: prefer archive, then download_history
+        up_mid = ""
+        up_name = ""
+        title = bvid
+        arch = self._archive.get(bvid) if self._archive else None
+        if arch and arch.get("source_type") == "up":
+            up_mid = arch.get("source_id", "")
+            up_name = arch.get("source_name", "")
+            title = arch.get("title", bvid)
+        else:
+            with self._state_lock:
+                for entry in reversed(self._state["download_history"]):
+                    if entry.get("bvid") == bvid:
+                        up_mid = entry.get("up_mid", "")
+                        up_name = entry.get("up_name", "")
+                        title = entry.get("title", bvid)
+                        break
+
+        if not up_name:
+            return (
+                f"BV {bvid} 未找到归档或历史记录，无法确定所属UP主。\n"
+                f"如果该视频不属于监控的UP主，请使用 <code>/dl</code> 命令单独下载。"
+            )
+
+        # Remove from archive and downloaded_bvids to force re-download
+        if self._archive:
+            self._archive.remove(bvid)
+        with self._state_lock:
+            bvids = self._state["downloaded_bvids"]
+            if bvid in bvids:
+                bvids.remove(bvid)
+            self._save_state()
+
+        task = {
+            "bvid": bvid,
+            "title": title,
+            "up_mid": up_mid,
+            "up_name": up_name,
+        }
+        self._redo_queue.put(task)
+        return (
+            f"已加入强制重下快速通道: <b>{html.escape(title)}</b>\n"
+            f"BV号: <code>{bvid}</code>\n"
+            f"UP主: {html.escape(up_name)}"
+        )
+
+    def _cmd_rebuild_archive(self) -> str:
+        if self._archive is None:
+            return "归档未启用。"
+        if not self._nas_enabled:
+            return "NAS 同步未启用。无法从 NAS 扫描重建归档。"
+
+        # SSH find to list all video files under nas_dest_dir
+        find_cmd = (
+            f"find {shlex.quote(self._nas_dest_dir)} -type f "
+            r"\( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' "
+            r"-o -name '*.flv' -o -name '*.avi' \)"
+        )
+        try:
+            result = subprocess.run(
+                ["ssh", self._nas_host, find_cmd],
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception as e:
+            return f"NAS 扫描失败: {html.escape(str(e))}"
+
+        if result.returncode != 0:
+            return f"NAS 扫描失败: {html.escape((result.stderr or 'unknown')[-200:])}"
+
+        # Build UP name → mid lookup (so we can tag source_type accurately)
+        with self._state_lock:
+            up_name_to_mid = {info["name"]: mid for mid, info in self._state["monitored_ups"].items()}
+
+        bv_pattern = re.compile(r'\[(BV[a-zA-Z0-9]+)\]')
+        title_pattern = re.compile(r'^(.+?)\s*\[BV[a-zA-Z0-9]+\]')
+
+        added = 0
+        updated = 0
+        skipped_nobv = 0
+
+        for line in result.stdout.splitlines():
+            path = line.strip()
+            if not path:
+                continue
+            m = bv_pattern.search(path)
+            if not m:
+                skipped_nobv += 1
+                continue
+            bvid = m.group(1)
+
+            # Parent folder under nas_dest_dir
+            rel = path
+            if rel.startswith(self._nas_dest_dir.rstrip("/") + "/"):
+                rel = rel[len(self._nas_dest_dir.rstrip("/")) + 1:]
+            parts = rel.split("/", 1)
+            folder = parts[0] if len(parts) >= 2 else ""
+
+            filename = path.rsplit("/", 1)[-1]
+            tm = title_pattern.match(filename)
+            title = tm.group(1).strip() if tm else filename
+
+            source_type = "up" if folder in up_name_to_mid else "unknown"
+            source_id = up_name_to_mid.get(folder, "")
+
+            if self._archive.has(bvid):
+                updated += 1
+            else:
+                added += 1
+
+            self._archive.add(bvid, {
+                "path": path,
+                "title": title,
+                "source_type": source_type,
+                "source_id": source_id,
+                "source_name": folder,
+                "on_nas": True,
+            })
+
+        return (
+            f"<b>NAS 归档重建完成</b>\n"
+            f"扫描路径: <code>{html.escape(self._nas_dest_dir)}</code>\n"
+            f"新增: {added}，更新: {updated}，无 BV 号跳过: {skipped_nobv}\n"
+            f"归档总数: {self._archive.count()}"
+        )
+
+    def _cmd_clear_queue(self) -> str:
+        # Drain in-memory main queue (redo queue preserved)
+        drained = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+                drained += 1
+            except queue.Empty:
+                break
+        # Clear persistent pending_queue
+        with self._state_lock:
+            persisted = len(self._state["pending_queue"])
+            self._state["pending_queue"] = []
+            self._save_state()
+        cur = self._current_download
+        note = ""
+        if cur:
+            note = f"\n当前正在下载的视频不会中断：{html.escape(cur.get('title', ''))}"
+        return (
+            f"<b>已清空 UP主 下载队列</b>\n"
+            f"内存队列: 取消 {drained} 个\n"
+            f"持久化队列: 清除 {persisted} 个\n"
+            f"快速通道（redo）未受影响。{note}"
         )
 
     def _cmd_check(self) -> str:
@@ -413,6 +590,8 @@ class BilibiliUpMonitorHandler:
         activity = self._current_activity
         with self._queue.mutex:
             pending = list(self._queue.queue)
+        with self._redo_queue.mutex:
+            redo_pending = list(self._redo_queue.queue)
 
         lines = ["<b>下载队列</b>\n"]
         if cur:
@@ -423,6 +602,11 @@ class BilibiliUpMonitorHandler:
             lines.append("当前状态: NAS 批量同步中")
         else:
             lines.append("正在下载: 无")
+
+        if redo_pending:
+            lines.append(f"\n快速通道 ({len(redo_pending)}):")
+            for i, item in enumerate(redo_pending[:10], 1):
+                lines.append(f"  {i}. {html.escape(item['title'][:50])} (<code>{item['bvid']}</code>)")
 
         if pending:
             lines.append(f"\n等待中 ({len(pending)}):")
@@ -609,10 +793,17 @@ class BilibiliUpMonitorHandler:
             self._current_activity = "idle"
 
         while not self._shutdown_event.is_set():
+            # Prefer fast-track (redo) tasks before the main queue
+            task = None
+            is_redo = False
             try:
-                task = self._queue.get(timeout=5)
+                task = self._redo_queue.get_nowait()
+                is_redo = True
             except queue.Empty:
-                continue
+                try:
+                    task = self._queue.get(timeout=5)
+                except queue.Empty:
+                    continue
 
             # Handle sentinel tasks
             if task.get("_action") == "sync_all":
@@ -622,22 +813,61 @@ class BilibiliUpMonitorHandler:
                 except Exception as e:
                     logger.warning("NAS sync error: %s", e)
                 self._current_activity = "idle"
-                self._queue.task_done()
+                if is_redo:
+                    self._redo_queue.task_done()
+                else:
+                    self._queue.task_done()
                 continue
 
-            # Skip if already downloaded (prevents re-download after crash during record)
-            with self._state_lock:
-                already = task.get("bvid") in set(self._state["downloaded_bvids"])
-            if already:
+            bvid = task.get("bvid", "")
+
+            # Archive check: if already archived AND file verified on NAS, skip.
+            # Redo tasks bypass the archive check (they intentionally want re-download).
+            if not is_redo and self._archive is not None:
+                arch = self._archive.get(bvid)
+                if arch:
+                    on_nas = arch.get("on_nas", False)
+                    path = arch.get("path", "")
+                    verified = False
+                    if on_nas and path and self._nas_enabled:
+                        verified = verify_nas_file(self._nas_host, path)
+                    elif not on_nas and path:
+                        verified = Path(path).exists()
+                    if verified:
+                        logger.info("Archived already, skipping: %s (%s)", bvid, path)
+                        with self._state_lock:
+                            pq = self._state["pending_queue"]
+                            for i, item in enumerate(pq):
+                                if item.get("bvid") == bvid:
+                                    pq.pop(i)
+                                    break
+                            # Also mark in downloaded_bvids so future checks are cheap
+                            if bvid not in set(self._state["downloaded_bvids"]):
+                                self._state["downloaded_bvids"].append(bvid)
+                                self._trim_bvids()
+                            self._save_state()
+                        self._queue.task_done()
+                        continue
+                    else:
+                        # Archive says we have it, but file is missing — drop archive entry and re-download
+                        logger.warning("Archive entry for %s points to missing file, re-downloading", bvid)
+                        self._archive.remove(bvid)
+
+            # Skip if already downloaded (prevents re-download after crash during record).
+            # Redo tasks bypass this too (downloaded_bvids already cleared by _cmd_redo).
+            if not is_redo:
                 with self._state_lock:
-                    pq = self._state["pending_queue"]
-                    for i, item in enumerate(pq):
-                        if item.get("bvid") == task.get("bvid"):
-                            pq.pop(i)
-                            break
-                    self._save_state()
-                self._queue.task_done()
-                continue
+                    already = bvid in set(self._state["downloaded_bvids"])
+                if already:
+                    with self._state_lock:
+                        pq = self._state["pending_queue"]
+                        for i, item in enumerate(pq):
+                            if item.get("bvid") == bvid:
+                                pq.pop(i)
+                                break
+                        self._save_state()
+                    self._queue.task_done()
+                    continue
 
             self._current_download = task
             self._current_activity = "downloading"
@@ -648,18 +878,22 @@ class BilibiliUpMonitorHandler:
                 self._record_history(task, "failed", str(e))
                 self._notify_download_failure(task, str(e))
             finally:
-                # Remove from persistent queue only after download attempt finishes
-                # (so mid-download restarts will re-queue the task from state)
-                with self._state_lock:
-                    pq = self._state["pending_queue"]
-                    for i, item in enumerate(pq):
-                        if item.get("bvid") == task.get("bvid"):
-                            pq.pop(i)
-                            break
-                    self._save_state()
+                # Redo tasks are not tracked in persistent pending_queue;
+                # regular tasks are removed here so mid-download restarts re-queue them.
+                if not is_redo:
+                    with self._state_lock:
+                        pq = self._state["pending_queue"]
+                        for i, item in enumerate(pq):
+                            if item.get("bvid") == task.get("bvid"):
+                                pq.pop(i)
+                                break
+                        self._save_state()
                 self._current_download = None
                 self._current_activity = "idle"
-                self._queue.task_done()
+                if is_redo:
+                    self._redo_queue.task_done()
+                else:
+                    self._queue.task_done()
 
         logger.info("UP downloader thread stopped")
 
@@ -723,9 +957,24 @@ class BilibiliUpMonitorHandler:
 
         # NAS sync
         nas_status = ""
+        nas_ok = False
         if self._nas_enabled and filepath:
             nas_ok = self._sync_to_nas(filepath, safe_folder)
             nas_status = "\nNAS: 已同步" if nas_ok else "\nNAS: 同步失败"
+
+        # Archive entry — record final path (NAS if synced, else local)
+        if self._archive is not None and filepath:
+            final_path = filepath
+            if self._nas_enabled and nas_ok:
+                final_path = f"{self._nas_dest_dir}/{safe_folder}/{Path(filepath).name}"
+            self._archive.add(bvid, {
+                "path": final_path,
+                "title": title,
+                "source_type": "up",
+                "source_id": task.get("up_mid", ""),
+                "source_name": up_name,
+                "on_nas": bool(self._nas_enabled and nas_ok),
+            })
 
         self._record_history(task, "success")
         self._notify_download_success(task, filepath, nas_status)

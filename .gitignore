@@ -11,6 +11,7 @@ email_credentials.json
 email_state.json
 bilibili_fav_state.json
 bilibili_up_state.json
+bilibili_archive.json
 telegram_archive/
 video_downloads/
 telegram-bot-api-data/

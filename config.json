@@ -57,6 +57,7 @@
   "bilibili_up_check_interval": 300,
   "bilibili_up_download_dir": "video_downloads/bilibili_up",
   "bilibili_up_download_timeout": 600,
+  "bilibili_archive_path": "bilibili_archive.json",
   "telegram_api_base": "http://127.0.0.1:8081",
   "telegram_local_mode": true,
   "telegram_upload_limit_mb": 2000
