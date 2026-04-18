@@ -70,6 +70,7 @@ class BilibiliUpMonitorHandler:
         self._check_now_event = threading.Event()
         self._queue: queue.Queue[dict] = queue.Queue()
         self._current_download: dict | None = None
+        self._current_activity: str = "idle"  # idle | startup_sync | downloading | nas_syncing
 
         # WBI key cache
         self._wbi_mixin_key: str | None = None
@@ -82,8 +83,12 @@ class BilibiliUpMonitorHandler:
             "downloaded_bvids": [],
             "download_history": [],
             "pending_queue": [],
+            "paused": False,
         }
         self._load_state()
+        # Restore paused flag
+        if self._state.get("paused", False):
+            self._paused.set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -391,20 +396,31 @@ class BilibiliUpMonitorHandler:
 
     def _cmd_pause(self) -> str:
         self._paused.set()
+        with self._state_lock:
+            self._state["paused"] = True
+            self._save_state()
         return "UP主监控已暂停。使用 <code>/up resume</code> 恢复。"
 
     def _cmd_resume(self) -> str:
         self._paused.clear()
+        with self._state_lock:
+            self._state["paused"] = False
+            self._save_state()
         return "UP主监控已恢复。"
 
     def _cmd_queue(self) -> str:
         cur = self._current_download
+        activity = self._current_activity
         with self._queue.mutex:
             pending = list(self._queue.queue)
 
         lines = ["<b>下载队列</b>\n"]
         if cur:
             lines.append(f"正在下载:\n  {html.escape(cur['title'])} (<code>{cur['bvid']}</code>)")
+        elif activity == "startup_sync":
+            lines.append("当前状态: 启动时 NAS 同步中（同步完成后才会开始下载）")
+        elif activity == "nas_syncing":
+            lines.append("当前状态: NAS 批量同步中")
         else:
             lines.append("正在下载: 无")
 
@@ -585,10 +601,12 @@ class BilibiliUpMonitorHandler:
 
         # Sync any previously downloaded but unsynced files on startup
         if self._nas_enabled:
+            self._current_activity = "startup_sync"
             try:
                 self._sync_all_pending()
             except Exception as e:
                 logger.warning("Startup NAS sync error: %s", e)
+            self._current_activity = "idle"
 
         while not self._shutdown_event.is_set():
             try:
@@ -598,23 +616,31 @@ class BilibiliUpMonitorHandler:
 
             # Handle sentinel tasks
             if task.get("_action") == "sync_all":
+                self._current_activity = "nas_syncing"
                 try:
                     self._sync_all_pending()
                 except Exception as e:
                     logger.warning("NAS sync error: %s", e)
+                self._current_activity = "idle"
                 self._queue.task_done()
                 continue
 
-            # Remove from persistent queue
+            # Skip if already downloaded (prevents re-download after crash during record)
             with self._state_lock:
-                pq = self._state["pending_queue"]
-                for i, item in enumerate(pq):
-                    if item.get("bvid") == task.get("bvid"):
-                        pq.pop(i)
-                        break
-                self._save_state()
+                already = task.get("bvid") in set(self._state["downloaded_bvids"])
+            if already:
+                with self._state_lock:
+                    pq = self._state["pending_queue"]
+                    for i, item in enumerate(pq):
+                        if item.get("bvid") == task.get("bvid"):
+                            pq.pop(i)
+                            break
+                    self._save_state()
+                self._queue.task_done()
+                continue
 
             self._current_download = task
+            self._current_activity = "downloading"
             try:
                 self._download_video(task)
             except Exception as e:
@@ -622,7 +648,17 @@ class BilibiliUpMonitorHandler:
                 self._record_history(task, "failed", str(e))
                 self._notify_download_failure(task, str(e))
             finally:
+                # Remove from persistent queue only after download attempt finishes
+                # (so mid-download restarts will re-queue the task from state)
+                with self._state_lock:
+                    pq = self._state["pending_queue"]
+                    for i, item in enumerate(pq):
+                        if item.get("bvid") == task.get("bvid"):
+                            pq.pop(i)
+                            break
+                    self._save_state()
                 self._current_download = None
+                self._current_activity = "idle"
                 self._queue.task_done()
 
         logger.info("UP downloader thread stopped")

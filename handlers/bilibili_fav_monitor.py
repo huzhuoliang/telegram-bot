@@ -72,8 +72,12 @@ class BilibiliFavMonitorHandler:
             "downloaded_bvids": [],
             "download_history": [],
             "pending_queue": [],
+            "paused": False,
         }
         self._load_state()
+        # Restore paused flag
+        if self._state.get("paused", False):
+            self._paused.set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -377,10 +381,16 @@ class BilibiliFavMonitorHandler:
 
     def _cmd_pause(self) -> str:
         self._paused.set()
+        with self._state_lock:
+            self._state["paused"] = True
+            self._save_state()
         return "收藏夹监控已暂停。使用 <code>/fav resume</code> 恢复。"
 
     def _cmd_resume(self) -> str:
         self._paused.clear()
+        with self._state_lock:
+            self._state["paused"] = False
+            self._save_state()
         return "收藏夹监控已恢复。"
 
     def _cmd_queue(self) -> str:
@@ -567,14 +577,19 @@ class BilibiliFavMonitorHandler:
                 self._queue.task_done()
                 continue
 
-            # Remove from persistent queue
+            # Skip if already downloaded (prevents re-download after crash during record)
             with self._state_lock:
-                pq = self._state["pending_queue"]
-                for i, item in enumerate(pq):
-                    if item["bvid"] == task["bvid"]:
-                        pq.pop(i)
-                        break
-                self._save_state()
+                already = task["bvid"] in set(self._state["downloaded_bvids"])
+            if already:
+                with self._state_lock:
+                    pq = self._state["pending_queue"]
+                    for i, item in enumerate(pq):
+                        if item["bvid"] == task["bvid"]:
+                            pq.pop(i)
+                            break
+                    self._save_state()
+                self._queue.task_done()
+                continue
 
             self._current_download = task
             try:
@@ -584,6 +599,15 @@ class BilibiliFavMonitorHandler:
                 self._record_history(task, "failed", str(e))
                 self._notify_failure(task, str(e))
             finally:
+                # Remove from persistent queue only after download attempt finishes
+                # (so mid-download restarts will re-queue the task from state)
+                with self._state_lock:
+                    pq = self._state["pending_queue"]
+                    for i, item in enumerate(pq):
+                        if item["bvid"] == task["bvid"]:
+                            pq.pop(i)
+                            break
+                    self._save_state()
                 self._current_download = None
                 self._queue.task_done()
 
