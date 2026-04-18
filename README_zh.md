@@ -204,7 +204,8 @@ $whitelist remove <序号>     — 按序号删除
 | `/up add <UID> --download` | 添加 UP主 监控（自动下载模式） |
 | `/up remove <UID>` | 移除 UP主 监控 |
 | `/up mode <UID> notify/download` | 切换通知/下载模式 |
-| `/up download <UID>` | 全量下载该 UP主 所有视频 |
+| `/up download <UID>` | 下载该 UP主 缺失的视频（跳过已下载） |
+| `/up download <UID> --force` | 强制重新下载该 UP主 的所有视频 |
 | `/up check` | 立即检查新视频 |
 | `/up sync` | 同步本地文件到 NAS |
 | `/up queue` | 查看下载队列（当前 + 等待） |

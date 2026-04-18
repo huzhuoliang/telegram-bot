@@ -348,7 +348,8 @@ Monitors specified Bilibili uploaders (UP主) for new video uploads, sends Teleg
 | `/up add <UID> --download` | Add UP主 (auto-download mode) |
 | `/up remove <UID>` | Remove UP主 from monitoring |
 | `/up mode <UID> notify/download` | Switch mode for an UP |
-| `/up download <UID>` | Queue all videos from UP for download |
+| `/up download <UID>` | Queue missing videos from UP for download (skips already downloaded) |
+| `/up download <UID> --force` | Force re-download all videos from UP (ignores existing downloads) |
 | `/up check` | Trigger immediate check |
 | `/up sync` | Sync all local files to NAS |
 | `/up queue` | View download queue (current + pending) |

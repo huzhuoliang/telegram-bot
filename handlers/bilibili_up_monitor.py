@@ -157,7 +157,8 @@ class BilibiliUpMonitorHandler:
                 "<code>/up add &lt;UID&gt; --download</code> — 添加UP主（自动下载）\n"
                 "<code>/up remove &lt;UID&gt;</code> — 移除UP主\n"
                 "<code>/up mode &lt;UID&gt; notify/download</code> — 切换模式\n"
-                "<code>/up download &lt;UID&gt;</code> — 全量下载UP主视频\n"
+                "<code>/up download &lt;UID&gt;</code> — 下载UP主缺失的视频\n"
+                "<code>/up download &lt;UID&gt; --force</code> — 强制重新下载全部\n"
                 "<code>/up check</code> — 立即检查\n"
                 "<code>/up sync</code> — 同步本地文件到 NAS\n"
                 "<code>/up pause</code> — 暂停监控\n"
@@ -298,9 +299,13 @@ class BilibiliUpMonitorHandler:
         return f"UP主 <b>{html.escape(name)}</b> 已切换为: {mode_text}"
 
     def _cmd_download(self, arg: str) -> str:
-        mid_str = arg.strip()
-        if not mid_str.isdigit():
-            return "用法: <code>/up download &lt;UID&gt;</code>"
+        # Parse --force flag
+        parts = arg.strip().split()
+        force = "--force" in parts
+        parts = [p for p in parts if p != "--force"]
+        if not parts or not parts[0].isdigit():
+            return "用法: <code>/up download &lt;UID&gt; [--force]</code>\n默认只下载缺失的视频；<code>--force</code> 强制重新下载全部。"
+        mid_str = parts[0]
 
         # Get UP name
         with self._state_lock:
@@ -333,19 +338,25 @@ class BilibiliUpMonitorHandler:
             queued_bvids.add(cur["bvid"])
 
         count = 0
+        skipped_downloaded = 0
         with self._state_lock:
             known = set(self._state["downloaded_bvids"])
             for v in reversed(all_videos):  # oldest first into queue
                 bvid = v.get("bvid", "")
                 if not bvid or bvid in queued_bvids:
                     continue
-                # Remove from known so downloader will process it
                 if bvid in known:
-                    try:
-                        self._state["downloaded_bvids"].remove(bvid)
-                    except ValueError:
-                        pass
-                    known.discard(bvid)
+                    if force:
+                        # Remove from known so downloader will re-process it
+                        try:
+                            self._state["downloaded_bvids"].remove(bvid)
+                        except ValueError:
+                            pass
+                        known.discard(bvid)
+                    else:
+                        # Default: skip already-downloaded
+                        skipped_downloaded += 1
+                        continue
                 task = {
                     "bvid": bvid,
                     "title": v.get("title", bvid),
@@ -360,10 +371,12 @@ class BilibiliUpMonitorHandler:
         warn = ""
         if not complete:
             warn = "\n⚠ 分页中断（B站限流），未获取完整列表。稍后请再次运行此命令补齐。"
+        mode_text = "强制重下" if force else "只下载缺失"
         return (
-            f"UP主 <b>{html.escape(up_name)}</b> 全量下载已启动\n"
-            f"有效视频: {len(all_videos)}，新加入队列: {count}，"
-            f"跳过（已在队列/已下载）: {len(all_videos) - count}{warn}"
+            f"UP主 <b>{html.escape(up_name)}</b> 全量下载已启动（模式: {mode_text}）\n"
+            f"有效视频: {len(all_videos)}，新加入队列: {count}\n"
+            f"跳过（已在队列）: {len(all_videos) - count - skipped_downloaded}，"
+            f"跳过（已下载）: {skipped_downloaded}{warn}"
         )
 
     def _cmd_check(self) -> str:

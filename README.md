@@ -204,7 +204,8 @@ Monitor Bilibili uploaders (UP主) for new video uploads. Requires `bilibili_up_
 | `/up add <UID> --download` | Add uploader (auto-download mode) |
 | `/up remove <UID>` | Remove uploader from monitoring |
 | `/up mode <UID> notify/download` | Switch mode for an uploader |
-| `/up download <UID>` | Queue all videos from uploader for download |
+| `/up download <UID>` | Queue missing videos from uploader (skips already downloaded) |
+| `/up download <UID> --force` | Force re-download all videos from uploader |
 | `/up check` | Trigger immediate check for new videos |
 | `/up sync` | Sync all local files to NAS |
 | `/up queue` | View download queue (current + pending) |

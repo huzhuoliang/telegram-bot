@@ -54,7 +54,8 @@
   <code>/up add UID --download</code> — 添加UP主（自动下载模式）
   <code>/up remove UID</code> — 移除监控
   <code>/up mode UID notify/download</code> — 切换通知/下载模式
-  <code>/up download UID</code> — 全量下载UP主视频
+  <code>/up download UID</code> — 下载UP主缺失视频（跳过已下载）
+  <code>/up download UID --force</code> — 强制重新下载全部
   <code>/up check</code> — 立即检查新视频
   <code>/up sync</code> — 同步本地文件到 NAS
   <code>/up queue</code> — 查看下载队列
