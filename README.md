@@ -212,6 +212,7 @@ Monitor Bilibili uploaders (UP主) for new video uploads. Requires `bilibili_up_
 | `/up download <UID> --force` | Force re-download all videos from uploader |
 | `/up redo <BV>` | Force re-download a single video (fast-track queue) |
 | `/up rebuild_archive` | Scan NAS and rebuild the shared archive from filenames |
+| `/up reconcile` | Remove downloaded_bvids entries not in the archive (recover missed videos) |
 | `/up clear_queue` | Empty the main download queue (current download not interrupted) |
 | `/up check` | Trigger immediate check for new videos |
 | `/up sync` | Sync all local files to NAS |

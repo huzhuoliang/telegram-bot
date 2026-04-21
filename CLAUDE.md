@@ -356,6 +356,7 @@ Monitors specified Bilibili uploaders (UP主) for new video uploads, sends Teleg
 | `/up download <UID> --force` | Force re-download all videos from UP (ignores existing downloads) |
 | `/up redo <BV>` | Force re-download a single video via fast-track queue |
 | `/up rebuild_archive` | Scan NAS directory and rebuild the shared archive from filenames |
+| `/up reconcile` | Remove entries from downloaded_bvids that are not in the archive (recover videos missed due to earlier bug) |
 | `/up clear_queue` | Empty the main download queue (in-memory + persistent); current download and redo queue preserved |
 | `/up check` | Trigger immediate check |
 | `/up sync` | Sync all local files to NAS |

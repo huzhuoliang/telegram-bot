@@ -150,6 +150,8 @@ class BilibiliUpMonitorHandler:
             result = self._cmd_redo(sub[5:].strip())
         elif sub_lower == "rebuild_archive":
             result = self._cmd_rebuild_archive()
+        elif sub_lower == "reconcile":
+            result = self._cmd_reconcile()
         elif sub_lower == "clear_queue":
             result = self._cmd_clear_queue()
         elif sub_lower == "check":
@@ -177,6 +179,7 @@ class BilibiliUpMonitorHandler:
                 "<code>/up download &lt;UID&gt; --force</code> — 强制重新下载全部\n"
                 "<code>/up redo &lt;BV号&gt;</code> — 强制重新下载单个视频（快速通道）\n"
                 "<code>/up rebuild_archive</code> — 从 NAS 重建归档索引\n"
+                "<code>/up reconcile</code> — 移除已下载标记中不在归档里的 BV（修复遗漏视频）\n"
                 "<code>/up clear_queue</code> — 清空下载队列（不中断当前下载）\n"
                 "<code>/up check</code> — 立即检查\n"
                 "<code>/up sync</code> — 同步本地文件到 NAS\n"
@@ -533,6 +536,34 @@ class BilibiliUpMonitorHandler:
             f"扫描路径: <code>{html.escape(self._nas_dest_dir)}</code>\n"
             f"新增: {added}，更新: {updated}，无 BV 号跳过: {skipped_nobv}\n"
             f"归档总数: {self._archive.count()}"
+        )
+
+    def _cmd_reconcile(self) -> str:
+        if self._archive is None:
+            return "归档未启用，无法执行 reconcile。"
+
+        with self._state_lock:
+            bvids = list(self._state["downloaded_bvids"])
+            total = len(bvids)
+            kept = [b for b in bvids if self._archive.has(b)]
+            removed = total - len(kept)
+            if removed > 0:
+                self._state["downloaded_bvids"] = kept
+                self._save_state()
+
+        note = ""
+        if removed > 0:
+            note = (
+                f"\n\n现在可对受影响的 UP主 运行 <code>/up download &lt;UID&gt;</code> 重新检测并补下。"
+            )
+        else:
+            note = "\n\n无需修复。"
+
+        return (
+            f"<b>downloaded_bvids 对齐归档完成</b>\n"
+            f"总计: {total}\n"
+            f"保留（归档中存在）: {len(kept)}\n"
+            f"移除（归档中不存在）: {removed}{note}"
         )
 
     def _cmd_clear_queue(self) -> str:
