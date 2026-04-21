@@ -757,11 +757,11 @@ class BilibiliUpMonitorHandler:
                     self._queue.put(task)
                     self._state["pending_queue"].append(task)
 
-                # Mark as known
-                self._state["downloaded_bvids"].append(bvid)
+                # In-loop dedup only; do NOT persist to downloaded_bvids here.
+                # For auto-download: the downloader will add it after success.
+                # For notify-only: last_check_aid prevents re-detection next cycle.
                 known.add(bvid)
 
-            self._trim_bvids()
             self._save_state()
 
         # Send notifications (batch if too many)
