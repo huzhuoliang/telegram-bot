@@ -59,19 +59,26 @@ class BilibiliArchive:
             return dict(entry) if entry else None
 
     def add(self, bvid: str, entry: dict):
-        """Add or overwrite an entry. Fields expected:
-        path, title, source_type ("up"|"fav"), source_id, source_name, on_nas."""
+        """Add or overwrite an entry. Required fields:
+        path, title, source_type ("up"|"fav"|"unknown"), source_id, source_name, on_nas.
+        Optional fields: owner_mid, owner_name, staff (list), page_type.
+        Any other extra fields in `entry` are also persisted verbatim."""
         now = datetime.now(timezone.utc).isoformat()
+        base = {
+            "path": entry.get("path", ""),
+            "title": entry.get("title", ""),
+            "source_type": entry.get("source_type", ""),
+            "source_id": entry.get("source_id", ""),
+            "source_name": entry.get("source_name", ""),
+            "archived_at": entry.get("archived_at", now),
+            "on_nas": bool(entry.get("on_nas", False)),
+        }
+        # Preserve any additional fields the caller provided
+        for k, v in entry.items():
+            if k not in base:
+                base[k] = v
         with self._lock:
-            self._data[bvid] = {
-                "path": entry.get("path", ""),
-                "title": entry.get("title", ""),
-                "source_type": entry.get("source_type", ""),
-                "source_id": entry.get("source_id", ""),
-                "source_name": entry.get("source_name", ""),
-                "archived_at": entry.get("archived_at", now),
-                "on_nas": bool(entry.get("on_nas", False)),
-            }
+            self._data[bvid] = base
             self._save()
 
     def remove(self, bvid: str) -> bool:

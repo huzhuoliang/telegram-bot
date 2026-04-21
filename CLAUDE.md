@@ -316,18 +316,20 @@ Polls Bilibili favorites folders for newly added videos, auto-downloads via yt-d
 **Download directory structure (local, before NAS sync):**
 ```
 video_downloads/bilibili_fav/
-├── 默认收藏夹/     视频标题 [BV1xx].mp4
-├── 音乐收藏/       视频标题 [BV2yy].mp4
+├── 默认收藏夹/     2024-03-15_视频标题_[BV1xx].mp4
+├── 音乐收藏/       2024-05-01_视频标题_[BV2yy].mp4
 └── ...
 ```
 
 **NAS directory structure:**
 ```
 /volume1/Share/BilibiliVideos/
-├── 默认收藏夹/     视频标题 [BV1xx].mp4
-├── 音乐收藏/       视频标题 [BV2yy].mp4
+├── 默认收藏夹/     2024-03-15_视频标题_[BV1xx].mp4
+├── 音乐收藏/       2024-05-01_视频标题_[BV2yy].mp4
 └── ...
 ```
+
+**Filename format:** `<upload_date>_<title.70s>_[<BV>].<ext>` — date prefix makes ls sort chronologically. Legacy files can be migrated via `/up rename_archive`.
 
 ## Bilibili UP monitor (handlers/bilibili_up_monitor.py)
 
@@ -357,6 +359,7 @@ Monitors specified Bilibili uploaders (UP主) for new video uploads, sends Teleg
 | `/up redo <BV>` | Force re-download a single video via fast-track queue |
 | `/up rebuild_archive` | Scan NAS directory and rebuild the shared archive from filenames |
 | `/up reconcile` | Remove entries from downloaded_bvids that are not in the archive (recover videos missed due to earlier bug) |
+| `/up rename_archive` | Background rename of every archived file to `YYYY-MM-DD_<title>_[BV].ext` format; updates archive paths |
 | `/up clear_queue` | Empty the main download queue (in-memory + persistent); current download and redo queue preserved |
 | `/up check` | Trigger immediate check |
 | `/up sync` | Sync all local files to NAS |
@@ -369,10 +372,12 @@ Monitors specified Bilibili uploaders (UP主) for new video uploads, sends Teleg
 **Download directory structure:**
 ```
 video_downloads/bilibili_up/
-├── UP主名称1/     视频标题 [BV1xx].mp4
-├── UP主名称2/     视频标题 [BV2yy].mp4
+├── UP主名称1/     2024-03-15_视频标题_[BV1xx].mp4
+├── UP主名称2/     2024-05-01_视频标题_[BV2yy].mp4
 └── ...
 ```
+
+For collaboration videos (`staff` credit on the monitored UP's space), the real `owner.name` from the API is used as the folder instead of the monitored UP's name, so the file lands with the original author. The archive records both `source_name` (monitored UP) and `owner_name` + `staff` (collaborators).
 
 **NAS sync:** Reuses `bilibili_fav_nas_*` configuration. UP videos sync to the same NAS base path in per-UP-name subdirectories.
 

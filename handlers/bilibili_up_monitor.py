@@ -76,6 +76,7 @@ class BilibiliUpMonitorHandler:
         self._redo_queue: queue.Queue[dict] = queue.Queue()  # fast-track queue for /up redo
         self._current_download: dict | None = None
         self._current_activity: str = "idle"  # idle | startup_sync | downloading | nas_syncing
+        self._rename_lock = threading.Lock()  # ensures /up rename_archive runs once at a time
 
         # WBI key cache
         self._wbi_mixin_key: str | None = None
@@ -152,6 +153,8 @@ class BilibiliUpMonitorHandler:
             result = self._cmd_rebuild_archive()
         elif sub_lower == "reconcile":
             result = self._cmd_reconcile()
+        elif sub_lower == "rename_archive":
+            result = self._cmd_rename_archive()
         elif sub_lower == "clear_queue":
             result = self._cmd_clear_queue()
         elif sub_lower == "check":
@@ -180,6 +183,7 @@ class BilibiliUpMonitorHandler:
                 "<code>/up redo &lt;BV号&gt;</code> — 强制重新下载单个视频（快速通道）\n"
                 "<code>/up rebuild_archive</code> — 从 NAS 重建归档索引\n"
                 "<code>/up reconcile</code> — 移除已下载标记中不在归档里的 BV（修复遗漏视频）\n"
+                "<code>/up rename_archive</code> — 按 YYYY-MM-DD_标题_[BV] 批量改名存量文件\n"
                 "<code>/up clear_queue</code> — 清空下载队列（不中断当前下载）\n"
                 "<code>/up check</code> — 立即检查\n"
                 "<code>/up sync</code> — 同步本地文件到 NAS\n"
@@ -522,12 +526,18 @@ class BilibiliUpMonitorHandler:
             else:
                 added += 1
 
+            # Preserve existing owner/staff/page_type fields if archive already has them
+            existing = self._archive.get(bvid) or {}
             self._archive.add(bvid, {
                 "path": path,
                 "title": title,
                 "source_type": source_type,
                 "source_id": source_id,
                 "source_name": folder,
+                "owner_mid": existing.get("owner_mid", ""),
+                "owner_name": existing.get("owner_name", folder if source_type == "up" else ""),
+                "staff": existing.get("staff", []),
+                "page_type": existing.get("page_type", "video"),
                 "on_nas": True,
             })
 
@@ -565,6 +575,176 @@ class BilibiliUpMonitorHandler:
             f"保留（归档中存在）: {len(kept)}\n"
             f"移除（归档中不存在）: {removed}{note}"
         )
+
+    def _cmd_rename_archive(self) -> str:
+        if self._archive is None:
+            return "归档未启用，无法执行 rename_archive。"
+        if not self._rename_lock.acquire(blocking=False):
+            return "已有 rename_archive 任务在运行中，请稍候。"
+        # Hand off to background thread — the operation takes many minutes.
+        thread = threading.Thread(
+            target=self._run_rename_archive,
+            name="bilibili-up-rename",
+            daemon=True,
+        )
+        thread.start()
+        return (
+            "<b>批量改名任务已启动</b>\n"
+            "目标格式: <code>YYYY-MM-DD_标题_[BV号].ext</code>\n"
+            "后台运行，每 50 条报告一次进度，完成后会发通知。"
+        )
+
+    def _run_rename_archive(self):
+        """Background worker: rename every archived file to the new format and update archive."""
+        try:
+            self._run_rename_archive_impl()
+        except Exception as e:
+            logger.exception("rename_archive failed: %s", e)
+            if self._client:
+                self._client.send_message(
+                    f"<b>[批量改名]</b> 任务异常终止: {html.escape(str(e))}",
+                    parse_mode="HTML",
+                )
+        finally:
+            self._rename_lock.release()
+
+    @staticmethod
+    def _sanitize_title(title: str, maxlen: int = 70) -> str:
+        """Match yt-dlp's minimal Linux sanitization: replace '/' with '_' and truncate."""
+        t = (title or "").replace("/", "_").replace("\0", "").strip()
+        if len(t) > maxlen:
+            t = t[:maxlen]
+        return t or "untitled"
+
+    @staticmethod
+    def _parse_filename_ext(path: str) -> tuple[str, str, str]:
+        """Return (directory, basename_without_ext, ext_with_dot) for a path string."""
+        p = Path(path)
+        return str(p.parent), p.stem, p.suffix
+
+    @staticmethod
+    def _ssh_mv(host: str, old: str, new: str, timeout: int = 30) -> tuple[bool, str]:
+        """Move a file on the NAS via ssh. Returns (ok, stderr)."""
+        cmd_str = f"mv -n {shlex.quote(old)} {shlex.quote(new)}"
+        try:
+            r = subprocess.run(
+                ["ssh", host, cmd_str],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode == 0:
+                return True, ""
+            return False, (r.stderr or "")[-200:]
+        except Exception as e:
+            return False, str(e)
+
+    def _run_rename_archive_impl(self):
+        start = time.time()
+        archive_items = list(self._archive._data.items())  # snapshot
+        total = len(archive_items)
+        renamed = 0
+        skipped_no_date = 0
+        skipped_same = 0
+        skipped_missing_file = 0
+        failed = 0
+
+        def progress_msg(done: int):
+            return (
+                f"<b>[批量改名]</b> 进度 {done}/{total}\n"
+                f"已改名: {renamed}，"
+                f"已是新格式: {skipped_same}，"
+                f"缺日期跳过: {skipped_no_date}，"
+                f"文件缺失: {skipped_missing_file}，"
+                f"失败: {failed}"
+            )
+
+        for i, (bvid, entry) in enumerate(archive_items, 1):
+            if self._shutdown_event.is_set():
+                break
+
+            old_path = entry.get("path", "")
+            if not old_path:
+                continue
+
+            # Try to get upload_date; if missing, query API
+            upload_date = entry.get("upload_date", "")
+            if not upload_date:
+                details = self._api_get_video_details(bvid)
+                if details:
+                    pubdate = details.get("pubdate") or details.get("ctime")
+                    if pubdate:
+                        try:
+                            upload_date = datetime.fromtimestamp(int(pubdate)).strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+                time.sleep(0.5)  # rate limit courtesy
+            if not upload_date:
+                skipped_no_date += 1
+                continue
+
+            title = entry.get("title", "") or bvid
+            dir_, stem, ext = self._parse_filename_ext(old_path)
+            new_basename = f"{upload_date}_{self._sanitize_title(title)}_[{bvid}]{ext}"
+            new_path = f"{dir_}/{new_basename}"
+
+            if old_path == new_path:
+                # Already in new format; still persist upload_date if it was missing
+                if not entry.get("upload_date"):
+                    e2 = dict(entry)
+                    e2["upload_date"] = upload_date
+                    self._archive.add(bvid, e2)
+                skipped_same += 1
+                continue
+
+            on_nas = bool(entry.get("on_nas"))
+            if on_nas and self._nas_enabled:
+                ok, err = self._ssh_mv(self._nas_host, old_path, new_path)
+                if not ok:
+                    if "No such file" in err or "not exist" in err.lower():
+                        skipped_missing_file += 1
+                    else:
+                        failed += 1
+                        logger.warning("rename NAS mv failed for %s: %s", bvid, err)
+                    continue
+            else:
+                # Local file
+                try:
+                    Path(old_path).rename(new_path)
+                except FileNotFoundError:
+                    skipped_missing_file += 1
+                    continue
+                except Exception as e:
+                    failed += 1
+                    logger.warning("rename local failed for %s: %s", bvid, e)
+                    continue
+
+            # Update archive
+            e2 = dict(entry)
+            e2["path"] = new_path
+            e2["upload_date"] = upload_date
+            self._archive.add(bvid, e2)
+            renamed += 1
+
+            # Periodic progress report
+            if i % 50 == 0 and self._client:
+                try:
+                    self._client.send_message(progress_msg(i), parse_mode="HTML")
+                except Exception:
+                    pass
+
+        elapsed = int(time.time() - start)
+        summary = (
+            f"<b>[批量改名] 完成</b>\n"
+            f"总计: {total}\n"
+            f"已改名: {renamed}\n"
+            f"已是新格式: {skipped_same}\n"
+            f"缺日期跳过: {skipped_no_date}\n"
+            f"文件缺失: {skipped_missing_file}\n"
+            f"失败: {failed}\n"
+            f"耗时: {elapsed}s"
+        )
+        logger.info("rename_archive done: %s", summary.replace("\n", " | "))
+        if self._client:
+            self._client.send_message(summary, parse_mode="HTML")
 
     def _cmd_clear_queue(self) -> str:
         # Drain in-memory main queue (redo queue preserved)
@@ -928,15 +1108,77 @@ class BilibiliUpMonitorHandler:
 
         logger.info("UP downloader thread stopped")
 
+    def _api_get_video_details(self, bvid: str) -> dict | None:
+        """Fetch full video metadata: owner, staff, festival_jump_url, state, etc."""
+        cookie = self._build_cookie_header()
+        try:
+            req = urllib.request.Request(
+                f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+                headers={"User-Agent": USER_AGENT, "Cookie": cookie},
+            )
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(resp.read().decode())
+            if data.get("code") == 0:
+                return data.get("data", {})
+            logger.warning("video view API code=%s for %s: %s",
+                           data.get("code"), bvid, data.get("message", ""))
+        except Exception as e:
+            logger.warning("Failed to get video details for %s: %s", bvid, e)
+        return None
+
     def _download_video(self, task: dict):
         bvid = task["bvid"]
         title = task["title"]
         up_name = task["up_name"]
 
-        url = f"https://www.bilibili.com/video/{bvid}"
+        # Pre-fetch detailed metadata: page type, owner, staff, accessibility
+        details = self._api_get_video_details(bvid)
 
-        # Create per-UP subdirectory
-        safe_folder = re.sub(r'[\\/:*?"<>|]', '_', up_name).strip() or "default"
+        url = f"https://www.bilibili.com/video/{bvid}"
+        page_type = "video"
+        owner_mid = str(task.get("up_mid", ""))
+        owner_name = up_name
+        staff: list[dict] = []
+        upload_date = ""
+
+        if details:
+            # Accessibility checks
+            if details.get("is_upower_exclusive") or details.get("is_upower_play"):
+                raise RuntimeError("充电专属视频，无下载权限")
+            state = details.get("state", 0)
+            if state != 0:
+                raise RuntimeError(f"视频状态异常 (state={state})")
+
+            # Festival page detection
+            festival_url = details.get("festival_jump_url")
+            if festival_url:
+                url = festival_url
+                page_type = "festival"
+
+            # Real owner (may differ from monitored UP if this is a collab / staff credit)
+            owner = details.get("owner") or {}
+            if owner.get("mid"):
+                owner_mid = str(owner["mid"])
+                owner_name = owner.get("name") or up_name
+
+            # Collaborator list
+            for s in details.get("staff") or []:
+                staff.append({
+                    "mid": str(s.get("mid", "")),
+                    "name": s.get("name", ""),
+                    "title": s.get("title", ""),
+                })
+
+            # Upload date (for filename + archive)
+            pubdate = details.get("pubdate") or details.get("ctime")
+            if pubdate:
+                try:
+                    upload_date = datetime.fromtimestamp(int(pubdate)).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
+        # Use real owner name for folder so collab videos land in the original author's dir
+        safe_folder = re.sub(r'[\\/:*?"<>|]', '_', owner_name).strip() or "default"
         folder_dir = self._download_dir / safe_folder
         folder_dir.mkdir(parents=True, exist_ok=True)
 
@@ -944,7 +1186,7 @@ class BilibiliUpMonitorHandler:
             "yt-dlp",
             "-f", "bestvideo+bestaudio/best",
             "--merge-output-format", "mp4",
-            "-o", "%(title).80s [%(id)s].%(ext)s",
+            "-o", "%(upload_date>%Y-%m-%d)s_%(title).70s_[%(id)s].%(ext)s",
             "--no-playlist",
             "--no-part",
             "--force-overwrites",
@@ -956,7 +1198,7 @@ class BilibiliUpMonitorHandler:
             cmd.extend(["--proxy", self._proxy])
         cmd.append(url)
 
-        logger.info("Downloading %s: %s", bvid, title)
+        logger.info("Downloading %s: %s (page=%s, owner=%s)", bvid, title, page_type, owner_name)
 
         result = subprocess.run(
             cmd,
@@ -993,7 +1235,7 @@ class BilibiliUpMonitorHandler:
             nas_ok = self._sync_to_nas(filepath, safe_folder)
             nas_status = "\nNAS: 已同步" if nas_ok else "\nNAS: 同步失败"
 
-        # Archive entry — record final path (NAS if synced, else local)
+        # Archive entry — record final path (NAS if synced, else local) + owner/staff
         if self._archive is not None and filepath:
             final_path = filepath
             if self._nas_enabled and nas_ok:
@@ -1004,14 +1246,22 @@ class BilibiliUpMonitorHandler:
                 "source_type": "up",
                 "source_id": task.get("up_mid", ""),
                 "source_name": up_name,
+                "owner_mid": owner_mid,
+                "owner_name": owner_name,
+                "staff": staff,
+                "page_type": page_type,
+                "upload_date": upload_date,
                 "on_nas": bool(self._nas_enabled and nas_ok),
             })
 
         self._record_history(task, "success")
-        self._notify_download_success(task, filepath, nas_status)
+        self._notify_download_success(task, filepath, nas_status,
+                                      owner_name=owner_name, page_type=page_type,
+                                      staff=staff)
         logger.info("Downloaded %s: %s -> %s", bvid, title, filepath)
         debug_bus.emit("bilibili_up_download", {
             "bvid": bvid, "title": title, "status": "success",
+            "page_type": page_type, "owner_name": owner_name,
         })
 
     def _find_latest_file(self, directory: Path) -> str | None:
@@ -1142,15 +1392,36 @@ class BilibiliUpMonitorHandler:
         if self._client:
             self._client.send_message(msg, parse_mode="HTML")
 
-    def _notify_download_success(self, task: dict, filepath: str | None, nas_status: str = ""):
+    def _notify_download_success(self, task: dict, filepath: str | None, nas_status: str = "",
+                                  owner_name: str = "", page_type: str = "video",
+                                  staff: list[dict] | None = None):
         path_line = f"\n路径: <code>{html.escape(str(filepath))}</code>" if filepath else ""
+        # If real owner differs from monitored UP, it's a collab — show both
+        monitored_name = task.get("up_name", "")
+        if owner_name and owner_name != monitored_name:
+            up_line = (
+                f"UP主: {html.escape(owner_name)}（原作者）\n"
+                f"触发监控: {html.escape(monitored_name)}（联合投稿）\n"
+            )
+        else:
+            up_line = f"UP主: {html.escape(monitored_name)}\n"
+
+        staff_line = ""
+        if staff and len(staff) > 1:
+            names = "、".join(html.escape(f"{s.get('name','')}") for s in staff if s.get('name'))
+            staff_line = f"\n参与者: {names}"
+
+        page_tag = ""
+        if page_type and page_type != "video":
+            page_tag = f"\n页面类型: {page_type}"
+
         msg = (
             f"<b>[UP主视频下载]</b>\n\n"
-            f"UP主: {html.escape(task['up_name'])}\n"
+            f"{up_line}"
             f"标题: {html.escape(task['title'])}\n"
             f"BV号: <code>{task['bvid']}</code>\n"
             f"状态: 下载完成"
-            f"{path_line}{nas_status}"
+            f"{path_line}{nas_status}{page_tag}{staff_line}"
         )
         if self._client:
             self._client.send_message(msg, parse_mode="HTML")

@@ -62,6 +62,7 @@
   <code>/up redo BV号</code> — 强制重新下载单个视频（快速通道）
   <code>/up rebuild_archive</code> — 从 NAS 重建归档索引
   <code>/up reconcile</code> — 移除已下载标记中不在归档的 BV（修复遗漏视频）
+  <code>/up rename_archive</code> — 按 YYYY-MM-DD_标题_[BV] 批量改名存量文件
   <code>/up clear_queue</code> — 清空下载队列（不中断当前下载）
   <code>/up check</code> — 立即检查新视频
   <code>/up sync</code> — 同步本地文件到 NAS

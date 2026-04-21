@@ -771,14 +771,65 @@ class BilibiliFavMonitorHandler:
 
         logger.info("Fav downloader thread stopped")
 
+    def _api_get_video_details(self, bvid: str) -> dict | None:
+        """Fetch full video metadata: owner, staff, festival_jump_url, state, etc."""
+        cookie = self._build_cookie_header()
+        try:
+            req = urllib.request.Request(
+                f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+                headers={"User-Agent": USER_AGENT, "Cookie": cookie},
+            )
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(resp.read().decode())
+            if data.get("code") == 0:
+                return data.get("data", {})
+            logger.warning("video view API code=%s for %s: %s",
+                           data.get("code"), bvid, data.get("message", ""))
+        except Exception as e:
+            logger.warning("Failed to get video details for %s: %s", bvid, e)
+        return None
+
     def _download_video(self, task: dict):
         bvid = task["bvid"]
         title = task["title"]
         fav_title = task["fav_title"]
 
+        # Pre-fetch details to detect festival pages / upower / state issues
+        details = self._api_get_video_details(bvid)
         url = f"https://www.bilibili.com/video/{bvid}"
+        page_type = "video"
+        owner_mid = ""
+        owner_name = ""
+        staff: list[dict] = []
+        upload_date = ""
 
-        # Create per-folder subdirectory
+        if details:
+            if details.get("is_upower_exclusive") or details.get("is_upower_play"):
+                raise RuntimeError("充电专属视频，无下载权限")
+            state = details.get("state", 0)
+            if state != 0:
+                raise RuntimeError(f"视频状态异常 (state={state})")
+            festival_url = details.get("festival_jump_url")
+            if festival_url:
+                url = festival_url
+                page_type = "festival"
+            owner = details.get("owner") or {}
+            owner_mid = str(owner.get("mid", ""))
+            owner_name = owner.get("name", "")
+            for s in details.get("staff") or []:
+                staff.append({
+                    "mid": str(s.get("mid", "")),
+                    "name": s.get("name", ""),
+                    "title": s.get("title", ""),
+                })
+            pubdate = details.get("pubdate") or details.get("ctime")
+            if pubdate:
+                try:
+                    upload_date = datetime.fromtimestamp(int(pubdate)).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
+        # Fav videos stay organized by favorites folder name
         safe_folder = re.sub(r'[\\/:*?"<>|]', '_', fav_title).strip() or "default"
         folder_dir = self._download_dir / safe_folder
         folder_dir.mkdir(parents=True, exist_ok=True)
@@ -787,7 +838,7 @@ class BilibiliFavMonitorHandler:
             "yt-dlp",
             "-f", "bestvideo+bestaudio/best",
             "--merge-output-format", "mp4",
-            "-o", "%(title).80s [%(id)s].%(ext)s",
+            "-o", "%(upload_date>%Y-%m-%d)s_%(title).70s_[%(id)s].%(ext)s",
             "--no-playlist",
             "--no-part",
             "--force-overwrites",
@@ -799,7 +850,7 @@ class BilibiliFavMonitorHandler:
             cmd.extend(["--proxy", self._proxy])
         cmd.append(url)
 
-        logger.info("Downloading %s: %s", bvid, title)
+        logger.info("Downloading %s: %s (page=%s)", bvid, title, page_type)
 
         result = subprocess.run(
             cmd,
@@ -836,7 +887,7 @@ class BilibiliFavMonitorHandler:
             nas_ok = self._sync_to_nas(filepath, safe_folder)
             nas_status = "\nNAS: 已同步" if nas_ok else "\nNAS: 同步失败"
 
-        # Archive entry — record final path (NAS if synced, else local)
+        # Archive entry — record final path + owner/staff/page_type
         if self._archive is not None and filepath:
             final_path = filepath
             if self._nas_enabled and nas_ok:
@@ -847,6 +898,11 @@ class BilibiliFavMonitorHandler:
                 "source_type": "fav",
                 "source_id": task.get("fav_id", ""),
                 "source_name": fav_title,
+                "owner_mid": owner_mid,
+                "owner_name": owner_name,
+                "staff": staff,
+                "page_type": page_type,
+                "upload_date": upload_date,
                 "on_nas": bool(self._nas_enabled and nas_ok),
             })
 

@@ -213,6 +213,7 @@ $whitelist remove <序号>     — 按序号删除
 | `/up redo <BV>` | 强制重新下载单个视频（快速通道） |
 | `/up rebuild_archive` | 扫描 NAS 重建共享归档索引 |
 | `/up reconcile` | 移除已下载标记中不在归档里的 BV（修复遗漏视频） |
+| `/up rename_archive` | 按 `YYYY-MM-DD_标题_[BV].ext` 批量改名存量视频（后台任务） |
 | `/up clear_queue` | 清空下载队列（正在下载的不中断） |
 | `/up check` | 立即检查新视频 |
 | `/up sync` | 同步本地文件到 NAS |
