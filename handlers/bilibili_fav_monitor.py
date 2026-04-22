@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -426,6 +427,28 @@ class BilibiliFavMonitorHandler:
                 f"如果该视频不属于监控的收藏夹，请使用 <code>/dl</code> 命令单独下载。"
             )
 
+        # Delete stale archived file before removing archive entry
+        removed_note = ""
+        if arch:
+            old_path = arch.get("path", "")
+            on_nas = bool(arch.get("on_nas"))
+            if old_path:
+                if on_nas and self._nas_enabled:
+                    try:
+                        subprocess.run(
+                            ["ssh", self._nas_host, f"rm -f -- {shlex.quote(old_path)}"],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        removed_note = "\n已删除 NAS 旧文件"
+                    except Exception as e:
+                        logger.warning("redo: failed to remove NAS old file %s: %s", old_path, e)
+                elif not on_nas:
+                    try:
+                        Path(old_path).unlink(missing_ok=True)
+                        removed_note = "\n已删除本地旧文件"
+                    except Exception as e:
+                        logger.warning("redo: failed to remove local old file %s: %s", old_path, e)
+
         # Remove from archive and downloaded_bvids to force re-download
         if self._archive:
             self._archive.remove(bvid)
@@ -445,7 +468,7 @@ class BilibiliFavMonitorHandler:
         return (
             f"已加入强制重下快速通道: <b>{html.escape(title)}</b>\n"
             f"BV号: <code>{bvid}</code>\n"
-            f"收藏夹: {html.escape(fav_title)}"
+            f"收藏夹: {html.escape(fav_title)}{removed_note}"
         )
 
     def _cmd_clear_queue(self) -> str:
@@ -887,11 +910,15 @@ class BilibiliFavMonitorHandler:
             nas_ok = self._sync_to_nas(filepath, safe_folder)
             nas_status = "\nNAS: 已同步" if nas_ok else "\nNAS: 同步失败"
 
-        # Archive entry — record final path + owner/staff/page_type
+        # Archive entry — record final path + owner/staff/page_type.
+        # Also cleanup stale file at previous archive path.
         if self._archive is not None and filepath:
             final_path = filepath
             if self._nas_enabled and nas_ok:
                 final_path = f"{self._nas_dest_dir}/{safe_folder}/{Path(filepath).name}"
+            existing = self._archive.get(bvid)
+            old_path = existing.get("path", "") if existing else ""
+            old_on_nas = bool(existing and existing.get("on_nas"))
             self._archive.add(bvid, {
                 "path": final_path,
                 "title": title,
@@ -905,6 +932,8 @@ class BilibiliFavMonitorHandler:
                 "upload_date": upload_date,
                 "on_nas": bool(self._nas_enabled and nas_ok),
             })
+            if old_path and old_path != final_path:
+                self._cleanup_old_archived_file(old_path, old_on_nas)
 
         self._record_history(task, "success")
         self._notify_success(task, filepath, nas_status)
@@ -912,6 +941,26 @@ class BilibiliFavMonitorHandler:
         debug_bus.emit("bilibili_fav_download", {
             "bvid": bvid, "title": title, "status": "success",
         })
+
+    def _cleanup_old_archived_file(self, old_path: str, on_nas: bool):
+        """Remove a superseded archived file (different name from new path)."""
+        if not old_path:
+            return
+        if on_nas and self._nas_enabled:
+            try:
+                subprocess.run(
+                    ["ssh", self._nas_host, f"rm -f -- {shlex.quote(old_path)}"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                logger.info("Removed stale NAS file: %s", old_path)
+            except Exception as e:
+                logger.warning("Failed to remove stale NAS file %s: %s", old_path, e)
+        elif not on_nas:
+            try:
+                Path(old_path).unlink(missing_ok=True)
+                logger.info("Removed stale local file: %s", old_path)
+            except Exception as e:
+                logger.warning("Failed to remove stale local file %s: %s", old_path, e)
 
     def _find_latest_file(self, directory: Path) -> str | None:
         exts = {".mp4", ".mkv", ".webm", ".flv", ".avi"}
@@ -925,12 +974,22 @@ class BilibiliFavMonitorHandler:
     # ------------------------------------------------------------------
 
     _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".flv", ".avi"}
+    # yt-dlp intermediate stream files: `...[BV].f30120.mp4` etc. — skip on NAS sync.
+    _YTDLP_ITAG_RE = re.compile(r'^\.f\d{3,6}$')
+
+    @classmethod
+    def _is_ytdlp_intermediate(cls, name: str) -> bool:
+        p = Path(name)
+        return len(p.suffixes) >= 2 and bool(cls._YTDLP_ITAG_RE.match(p.suffixes[-2]))
 
     def _sync_to_nas(self, filepath: str, folder_name: str) -> bool:
         """Rsync a single file to NAS. Returns True on success."""
         filepath = Path(filepath)
         if not filepath.exists():
             logger.warning("NAS sync: file not found: %s", filepath)
+            return False
+        if self._is_ytdlp_intermediate(filepath.name):
+            logger.info("NAS sync: skipping yt-dlp intermediate: %s", filepath.name)
             return False
 
         remote_dir = f"{self._nas_dest_dir}/{folder_name}"
@@ -979,6 +1038,7 @@ class BilibiliFavMonitorHandler:
             files = [
                 f for f in subdir.iterdir()
                 if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS
+                and not self._is_ytdlp_intermediate(f.name)
             ]
             for f in sorted(files):
                 if self._shutdown_event.is_set():
